@@ -1,0 +1,28 @@
+# cargo-release configuration
+# Run: cargo release patch/minor/major
+
+[workspace]
+# Don't publish to crates.io
+publish = false
+
+# Create git tag
+tag = true
+tag-prefix = "v"
+tag-name = "{{prefix}}{{version}}"
+
+# Commit version bumps
+commit = true
+commit-message = "chore: release {{version}}"
+
+# Push commits and tags to remote
+push = true
+
+# Sign tags (disable if no GPG key configured)
+sign-tag = false
+sign-commit = false
+
+# Pre-release hooks
+pre-release-hook = ["cargo", "check"]
+
+# Consolidate commits for workspace
+consolidate-commits = true

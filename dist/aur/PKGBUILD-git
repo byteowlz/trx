@@ -1,0 +1,31 @@
+# Maintainer: byteowlz <https://github.com/byteowlz>
+pkgname=trx-git
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Minimal git-backed issue tracker (git version)'
+arch=('x86_64' 'aarch64')
+url='https://github.com/byteowlz/trx'
+license=('MIT')
+makedepends=('cargo' 'git')
+provides=('trx')
+conflicts=('trx' 'trx-bin')
+source=("git+https://github.com/byteowlz/trx.git")
+sha256sums=('SKIP')
+
+pkgver() {
+    cd trx
+    git describe --long --tags --abbrev=7 2>/dev/null | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g' || \
+    printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+}
+
+build() {
+    cd trx
+    export CARGO_TARGET_DIR=target
+    cargo build --release --locked
+}
+
+package() {
+    cd trx
+    install -Dm755 target/release/trx "$pkgdir/usr/bin/trx"
+    install -Dm755 target/release/trx-tui "$pkgdir/usr/bin/trx-tui"
+}

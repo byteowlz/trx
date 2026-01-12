@@ -1,0 +1,31 @@
+{
+    "version": "0.1.0",
+    "description": "Minimal git-backed issue tracker",
+    "homepage": "https://github.com/byteowlz/trx",
+    "license": "MIT",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/byteowlz/trx/releases/download/v0.1.0/trx-v0.1.0-x86_64-pc-windows-msvc.zip",
+            "hash": "PLACEHOLDER_HASH"
+        },
+        "arm64": {
+            "url": "https://github.com/byteowlz/trx/releases/download/v0.1.0/trx-v0.1.0-aarch64-pc-windows-msvc.zip",
+            "hash": "PLACEHOLDER_HASH"
+        }
+    },
+    "bin": [
+        "trx.exe",
+        "trx-tui.exe"
+    ],
+    "checkver": "github",
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/byteowlz/trx/releases/download/v$version/trx-v$version-x86_64-pc-windows-msvc.zip"
+            },
+            "arm64": {
+                "url": "https://github.com/byteowlz/trx/releases/download/v$version/trx-v$version-aarch64-pc-windows-msvc.zip"
+            }
+        }
+    }
+}

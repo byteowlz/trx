@@ -1,0 +1,14 @@
+pkgbase = trx-bin
+	pkgdesc = Minimal git-backed issue tracker (prebuilt binary)
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/byteowlz/trx
+	arch = x86_64
+	license = MIT
+	provides = trx
+	conflicts = trx
+	conflicts = trx-git
+	source = https://github.com/byteowlz/trx/releases/download/v0.1.0/trx-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
+	sha256sums = SKIP
+
+pkgname = trx-bin

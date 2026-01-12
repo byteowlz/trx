@@ -1,0 +1,17 @@
+# Maintainer: byteowlz <https://github.com/byteowlz>
+pkgname=trx-bin
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Minimal git-backed issue tracker (prebuilt binary)'
+arch=('x86_64')
+url='https://github.com/byteowlz/trx'
+license=('MIT')
+provides=('trx')
+conflicts=('trx' 'trx-git')
+source=("https://github.com/byteowlz/trx/releases/download/v${pkgver}/trx-v${pkgver}-x86_64-unknown-linux-gnu.tar.gz")
+sha256sums=('SKIP')
+
+package() {
+    install -Dm755 trx "$pkgdir/usr/bin/trx"
+    install -Dm755 trx-tui "$pkgdir/usr/bin/trx-tui"
+}

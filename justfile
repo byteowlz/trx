@@ -23,10 +23,17 @@ fmt:
 fmt-check:
     cargo fmt -- --check
 
-# Build and install locally
+# Build and install locally (CLI + TUI)
 install:
     cargo install --path crates/trx-cli
     cargo install --path crates/trx-tui
+
+# Install all binaries (CLI, TUI, API, MCP)
+install-all:
+    cargo install --path crates/trx-cli
+    cargo install --path crates/trx-tui
+    cargo install --path crates/trx-api
+    cargo install --path crates/trx-mcp
 
 # Run trx CLI
 run *args:
