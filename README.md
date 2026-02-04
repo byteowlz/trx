@@ -13,6 +13,14 @@ trx is a minimal, git-native issue tracker focused on simplicity and low overhea
 - Conflict-free merging with CRDT support (automerge)
 - Easy to understand and extend
 
+## Installation
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/cloonix/trx/master/install.sh | bash
+```
+
+Or build from source with `cargo install --path crates/trx-cli`.
+
 ## Architecture
 
 ```
