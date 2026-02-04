@@ -40,6 +40,14 @@ cargo build --release
 - Conflict-free merging with CRDT support (automerge)
 - Easy to understand and extend
 
+## Installation
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/cloonix/trx/main/install.sh | sh
+```
+
+Or build from source with `cargo install --path crates/trx-cli`.
+
 ## Architecture
 
 ```
