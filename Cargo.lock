@@ -2207,7 +2207,7 @@ dependencies = [
 
 [[package]]
 name = "trx-api"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -2225,7 +2225,7 @@ dependencies = [
 
 [[package]]
 name = "trx-cli"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2239,7 +2239,7 @@ dependencies = [
 
 [[package]]
 name = "trx-core"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "automerge",
@@ -2258,7 +2258,7 @@ dependencies = [
 
 [[package]]
 name = "trx-mcp"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2274,7 +2274,7 @@ dependencies = [
 
 [[package]]
 name = "trx-tui"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "chrono",
