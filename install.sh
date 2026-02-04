@@ -2,11 +2,11 @@
 # trx installer - Install trx issue tracker binaries to user space
 #
 # Quick install:
-#   curl -fsSL https://raw.githubusercontent.com/cloonix/trx/master/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/cloonix/trx/master/install.sh | bash
 #
 # With options:
-#   curl -fsSL https://raw.githubusercontent.com/cloonix/trx/master/install.sh | sh -s -- --version 0.2.1
-#   curl -fsSL https://raw.githubusercontent.com/cloonix/trx/master/install.sh | sh -s -- --prefix ~/bin
+#   curl -fsSL https://raw.githubusercontent.com/cloonix/trx/master/install.sh | bash -s -- --version 0.2.1
+#   curl -fsSL https://raw.githubusercontent.com/cloonix/trx/master/install.sh | bash -s -- --prefix ~/bin
 #
 # Or download and run:
 #   curl -fsSL https://raw.githubusercontent.com/cloonix/trx/master/install.sh > install.sh
@@ -62,10 +62,10 @@ Environment Variables:
 
 Examples:
     # Install latest version
-    curl -fsSL https://raw.githubusercontent.com/cloonix/trx/master/install.sh | sh
+    curl -fsSL https://raw.githubusercontent.com/cloonix/trx/master/install.sh | bash
 
     # Install specific version
-    curl -fsSL https://raw.githubusercontent.com/cloonix/trx/master/install.sh | sh -s -- --version 0.2.1
+    curl -fsSL https://raw.githubusercontent.com/cloonix/trx/master/install.sh | bash -s -- --version 0.2.1
 
     # Install to custom directory
     ./install.sh --prefix ~/bin
@@ -366,7 +366,7 @@ show_next_steps() {
     
     # Show uninstall instructions
     echo "To uninstall, run:"
-    echo "  $ curl -fsSL https://raw.githubusercontent.com/cloonix/trx/master/install.sh | sh -s -- --uninstall"
+    echo "  $ curl -fsSL https://raw.githubusercontent.com/cloonix/trx/master/install.sh | bash -s -- --uninstall"
     echo
 }
 
