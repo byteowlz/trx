@@ -2,6 +2,14 @@
 
 ## Open
 
+### [trx-p7y6] trx ready should show all unblocked issues, not just epics - leaf feature/task issues with no blockers should appear (P1, bug)
+
+### [trx-f4ck] trx list --epic <id> to show all children/descendants of an epic (P2, feature)
+
+### [trx-tkmz] trx list --json should include resolved parent, blocked_by, blocks fields - currently these are null even when dependencies exist (P2, bug)
+
+### [trx-pa3y] Custom ID prefix on create - 'trx create --id mmry-lrn' to control the generated issue ID prefix instead of random (P2, feature)
+
 ### [trx-nst7] Add list filters (status/type/priority/search) (P2, feature)
 Improve trx list ergonomics with flags like --status open,closed --type bug,task --priority 0..4 and --search text. Support combined filters.
 
@@ -16,6 +24,10 @@ Load workspace.yaml with multiple repos. Aggregate view across repos. Support be
 
 ### [trx-s0t.3] TUI: Dependency graph visualization (P2, task)
 ASCII/Unicode graph view showing dependency relationships. Highlight cycles, critical path, blocked chains.
+
+### [trx-cgs7] trx update should accept --description from stdin when value is '-', for adding long descriptions to existing issues (P3, feature)
+
+### [trx-te7r] trx handover - generate compact one-line summary of all issues with dependency order for agent handoff (P3, feature)
 
 ### [trx-bqnp] Add trx sync options for message and dry-run (P3, feature)
 Support --message to set commit message and --dry-run or --no-commit to inspect staged changes without committing.
@@ -51,5 +63,7 @@ For long issue text, allow trx create/update to read description from --descript
 - [trx-ned.2] CLI: create command - new issues (closed 2026-01-05)
 - [trx-ned.1] CLI: init command - create .trx directory (closed 2026-01-05)
 - [trx-af3] trx-core: Core library implementation (closed 2026-01-05)
-
-...and 4 more
+- [trx-af3.4] Hash-based ID generation for conflict-free merges (closed 2026-01-05)
+- [trx-af3.3] Dependency graph with cycle detection and ready-work analysis (closed 2026-01-05)
+- [trx-af3.2] JSONL store - read/write issues without SQLite (closed 2026-01-05)
+- [trx-af3.1] Issue data model with beads-compatible JSONL format (closed 2026-01-05)
