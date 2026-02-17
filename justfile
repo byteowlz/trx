@@ -65,3 +65,33 @@ issues:
 # Show ready (unblocked) issues
 ready:
     @bd ready 2>/dev/null || cargo run -p trx-cli -- ready
+
+# === Release ===
+
+# Release: bump version, commit, tag, and push
+release-bump version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    VERSION="{{version}}"
+    if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "Error: Version must be in format X.Y.Z"
+        exit 1
+    fi
+    echo "Bumping workspace version to $VERSION"
+    sed -i "s/^version = .*/version = \"$VERSION\"/" Cargo.toml
+    git add Cargo.toml
+    git commit -m "chore: bump version to $VERSION"
+    git tag "v$VERSION"
+    git push origin main
+    git push origin "v$VERSION"
+    echo "Release v$VERSION pushed! Workflow will start automatically."
+
+# Check release readiness
+release-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "Checking release readiness..."
+    cargo test --quiet
+    cargo clippy --all-targets --quiet -- -D warnings
+    cargo fmt -- --check
+    echo "All checks passed!"

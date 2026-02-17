@@ -6,6 +6,33 @@ trx is a minimal, git-native issue tracker focused on simplicity and low overhea
 
 **Philosophy**: Pure data layer. No daemon. No SQLite. Just JSONL files in git.
 
+## Installation
+
+### Homebrew (macOS and Linux)
+
+```bash
+brew tap byteowlz/tap
+brew install trx
+```
+
+### Arch Linux (AUR)
+
+```bash
+yay -S trx-bin
+```
+
+### Pre-built Binaries
+
+Download from [GitHub Releases](https://github.com/byteowlz/trx/releases).
+
+### Build from Source
+
+```bash
+git clone https://github.com/byteowlz/trx.git
+cd trx
+cargo build --release
+```
+
 ## Design Goals
 
 - Minimal footprint with ~20 fields per issue
