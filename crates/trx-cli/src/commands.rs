@@ -62,6 +62,7 @@ pub fn list(
     status: Option<String>,
     issue_type: Option<String>,
     all: bool,
+    limit: Option<usize>,
     json: bool,
 ) -> Result<()> {
     let store = UnifiedStore::open()?;
@@ -89,6 +90,11 @@ pub fn list(
             .cmp(&b.priority)
             .then_with(|| b.created_at.cmp(&a.created_at))
     });
+
+    // Apply limit
+    if let Some(n) = limit {
+        issues.truncate(n);
+    }
 
     if json {
         println!("{}", serde_json::to_string(&issues)?);
@@ -872,6 +878,201 @@ pub fn config_set(key: &str, value: &str) -> Result<()> {
 
     config.save(&config_path)?;
     println!("{} Set {} = {}", "✓".green(), key, value);
+
+    Ok(())
+}
+
+// ============================================================================
+// Resolve and merge driver commands
+// ============================================================================
+
+pub fn resolve(json: bool) -> Result<()> {
+    let mut store = UnifiedStore::open()?;
+
+    // Resolve any CRDT conflicts first (v2 only)
+    let resolved = store.resolve_conflicts()?;
+
+    // Regenerate ISSUES.md from source files
+    store.regenerate_issues_md()?;
+
+    if json {
+        println!(
+            r#"{{"resolved_conflicts": {}, "issues_md": "regenerated"}}"#,
+            resolved.len()
+        );
+    } else {
+        if !resolved.is_empty() {
+            println!(
+                "{} Resolved {} CRDT conflict(s):",
+                "✓".green(),
+                resolved.len()
+            );
+            for file in &resolved {
+                println!("  - {}", file);
+            }
+        }
+        println!("{} Regenerated ISSUES.md from source files", "✓".green());
+    }
+
+    Ok(())
+}
+
+/// Find the git repository root
+fn git_root() -> Result<std::path::PathBuf> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()?;
+    if !output.status.success() {
+        bail!("Not a git repository");
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(std::path::PathBuf::from(path))
+}
+
+/// Find the trx binary path
+fn trx_binary_path() -> Result<std::path::PathBuf> {
+    std::env::current_exe().map_err(|e| anyhow::anyhow!("Failed to find trx binary: {}", e))
+}
+
+pub fn merge_driver_install() -> Result<()> {
+    let git_root = git_root()?;
+    let trx_bin = trx_binary_path()?;
+
+    // 1. Configure the merge driver in .git/config
+    let status = std::process::Command::new("git")
+        .args([
+            "config",
+            "merge.trx-issues-md.name",
+            "Auto-regenerate ISSUES.md from trx source files",
+        ])
+        .status()?;
+    if !status.success() {
+        bail!("Failed to set merge driver name");
+    }
+
+    let driver_cmd = format!("{} resolve", trx_bin.display());
+    let status = std::process::Command::new("git")
+        .args(["config", "merge.trx-issues-md.driver", &driver_cmd])
+        .status()?;
+    if !status.success() {
+        bail!("Failed to set merge driver command");
+    }
+
+    // 2. Add .gitattributes entry for ISSUES.md
+    let gitattributes_path = git_root.join(".gitattributes");
+    let attr_line = ".trx/ISSUES.md merge=trx-issues-md";
+
+    let existing = if gitattributes_path.exists() {
+        std::fs::read_to_string(&gitattributes_path)?
+    } else {
+        String::new()
+    };
+
+    if !existing.lines().any(|l| l.trim() == attr_line) {
+        let mut content = existing;
+        if !content.is_empty() && !content.ends_with('\n') {
+            content.push('\n');
+        }
+        content.push_str(attr_line);
+        content.push('\n');
+        std::fs::write(&gitattributes_path, content)?;
+    }
+
+    println!("{} Installed trx merge driver", "✓".green());
+    println!("  Merge driver: {}", driver_cmd);
+    println!("  .gitattributes: {}", attr_line);
+    println!();
+    println!(
+        "ISSUES.md conflicts will now be auto-resolved during git merge/rebase."
+    );
+    println!(
+        "Remember to commit .gitattributes so the driver applies for all contributors."
+    );
+
+    Ok(())
+}
+
+pub fn merge_driver_uninstall() -> Result<()> {
+    let git_root = git_root()?;
+
+    // 1. Remove merge driver from .git/config
+    let _ = std::process::Command::new("git")
+        .args(["config", "--remove-section", "merge.trx-issues-md"])
+        .status();
+
+    // 2. Remove .gitattributes entry
+    let gitattributes_path = git_root.join(".gitattributes");
+    let attr_line = ".trx/ISSUES.md merge=trx-issues-md";
+
+    if gitattributes_path.exists() {
+        let content = std::fs::read_to_string(&gitattributes_path)?;
+        let filtered: Vec<&str> = content
+            .lines()
+            .filter(|l| l.trim() != attr_line)
+            .collect();
+
+        if filtered.is_empty() {
+            std::fs::remove_file(&gitattributes_path)?;
+        } else {
+            let mut new_content = filtered.join("\n");
+            new_content.push('\n');
+            std::fs::write(&gitattributes_path, new_content)?;
+        }
+    }
+
+    println!("{} Uninstalled trx merge driver", "✓".green());
+    println!("  Removed merge.trx-issues-md from git config");
+    println!("  Removed .gitattributes entry");
+
+    Ok(())
+}
+
+pub fn merge_driver_status() -> Result<()> {
+    let git_root = git_root()?;
+
+    // Check git config
+    let output = std::process::Command::new("git")
+        .args(["config", "--get", "merge.trx-issues-md.driver"])
+        .output()?;
+    let driver_configured = output.status.success();
+    let driver_cmd = if driver_configured {
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    } else {
+        String::new()
+    };
+
+    // Check .gitattributes
+    let gitattributes_path = git_root.join(".gitattributes");
+    let attr_line = ".trx/ISSUES.md merge=trx-issues-md";
+    let attr_configured = if gitattributes_path.exists() {
+        let content = std::fs::read_to_string(&gitattributes_path)?;
+        content.lines().any(|l| l.trim() == attr_line)
+    } else {
+        false
+    };
+
+    if driver_configured && attr_configured {
+        println!("Merge driver is {}", "installed".green());
+        println!("  Driver: {}", driver_cmd);
+        println!("  .gitattributes: {}", attr_line);
+    } else if driver_configured {
+        println!("Merge driver is {}", "partially installed".yellow());
+        println!("  Driver: {} (configured)", driver_cmd);
+        println!(
+            "  .gitattributes: {} (run 'trx merge-driver install' to fix)",
+            "missing".red()
+        );
+    } else if attr_configured {
+        println!("Merge driver is {}", "partially installed".yellow());
+        println!(
+            "  Driver: {} (run 'trx merge-driver install' to fix)",
+            "not configured".red()
+        );
+        println!("  .gitattributes: {} (present)", attr_line);
+    } else {
+        println!("Merge driver is {}", "not installed".yellow());
+        println!("  Run 'trx merge-driver install' to set up auto-resolution");
+    }
 
     Ok(())
 }

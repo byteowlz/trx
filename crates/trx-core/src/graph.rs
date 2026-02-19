@@ -164,7 +164,7 @@ mod tests {
 
     #[test]
     fn test_ready_issues() {
-        let mut issue1 = Issue::new("trx-001".into(), "First".into());
+        let issue1 = Issue::new("trx-001".into(), "First".into());
         let mut issue2 = Issue::new("trx-002".into(), "Second".into());
 
         // issue2 blocks issue1

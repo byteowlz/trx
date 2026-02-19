@@ -43,6 +43,7 @@ For long issue text, allow trx create/update to read description from --descript
 
 ## Closed
 
+- [trx-twga] Auto-resolve ISSUES.md merge conflicts (closed 2026-02-19)
 - [trx-gexn] print status (open/closed/etc) when running trx list (closed 2026-01-05)
 - [trx-7eq.3] Migration docs and byt integration (closed 2026-01-05)
 - [trx-7eq] Beads migration: Import and purge (closed 2026-01-05)

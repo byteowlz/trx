@@ -1,0 +1,35 @@
+{
+  "todos": [
+    {
+      "id": "1",
+      "content": "Add `trx resolve` CLI command - regenerates ISSUES.md from .automerge source files",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "2",
+      "content": "Add `trx merge-driver install` - configures git merge driver for ISSUES.md auto-resolution",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "3",
+      "content": "Add `trx merge-driver uninstall` - removes the git merge driver configuration",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "4",
+      "content": "Remote build and test",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "5",
+      "content": "Update issue trx-twga status",
+      "status": "completed",
+      "priority": "medium"
+    }
+  ],
+  "updated_at": "2026-02-19T07:14:53.686Z"
+}

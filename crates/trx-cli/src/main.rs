@@ -64,6 +64,10 @@ enum Commands {
         /// Show all including closed
         #[arg(short, long)]
         all: bool,
+
+        /// Limit number of issues shown
+        #[arg(short = 'l', long)]
+        limit: Option<usize>,
     },
 
     /// Show issue details
@@ -155,6 +159,15 @@ enum Commands {
     /// Output JSON schema for config file
     Schema,
 
+    /// Resolve merge conflicts in ISSUES.md by regenerating from source files
+    Resolve,
+
+    /// Manage git merge driver for auto-resolving ISSUES.md conflicts
+    MergeDriver {
+        #[command(subcommand)]
+        command: MergeDriverCommands,
+    },
+
     /// Show or edit configuration
     Config {
         #[command(subcommand)]
@@ -212,6 +225,18 @@ enum ServiceCommands {
 }
 
 #[derive(Subcommand)]
+enum MergeDriverCommands {
+    /// Install git merge driver for auto-resolving ISSUES.md conflicts
+    Install,
+
+    /// Remove the git merge driver configuration
+    Uninstall,
+
+    /// Show merge driver status
+    Status,
+}
+
+#[derive(Subcommand)]
 enum DepCommands {
     /// Add a dependency
     Add {
@@ -256,7 +281,8 @@ fn main() -> Result<()> {
             status,
             issue_type,
             all,
-        } => commands::list(status, issue_type, all, cli.json),
+            limit,
+        } => commands::list(status, issue_type, all, limit, cli.json),
         Commands::Show { id } => commands::show(&id, cli.json),
         Commands::Update {
             id,
@@ -281,6 +307,12 @@ fn main() -> Result<()> {
         Commands::Import { path, prefix } => commands::import(&path, prefix, cli.json),
         Commands::PurgeBeads { force } => commands::purge_beads(force),
         Commands::Schema => commands::schema(),
+        Commands::Resolve => commands::resolve(cli.json),
+        Commands::MergeDriver { command } => match command {
+            MergeDriverCommands::Install => commands::merge_driver_install(),
+            MergeDriverCommands::Uninstall => commands::merge_driver_uninstall(),
+            MergeDriverCommands::Status => commands::merge_driver_status(),
+        },
         Commands::Config { command } => match command {
             Some(ConfigCommands::Show) => commands::config_show(cli.json),
             Some(ConfigCommands::Edit) => commands::config_edit(),
