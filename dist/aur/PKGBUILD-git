@@ -1,15 +1,15 @@
-# Maintainer: byteowlz <https://github.com/byteowlz>
+# Maintainer: cloonix <https://github.com/cloonix>
 pkgname=trx-git
 pkgver=0.1.0
 pkgrel=1
 pkgdesc='Minimal git-backed issue tracker (git version)'
 arch=('x86_64' 'aarch64')
-url='https://github.com/byteowlz/trx'
+url='https://github.com/cloonix/trx'
 license=('MIT')
 makedepends=('cargo' 'git')
 provides=('trx')
 conflicts=('trx' 'trx-bin')
-source=("git+https://github.com/byteowlz/trx.git")
+source=("git+https://github.com/cloonix/trx.git")
 sha256sums=('SKIP')
 
 pkgver() {

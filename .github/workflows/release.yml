@@ -185,8 +185,8 @@ jobs:
              '.version = $version | 
               .architecture["64bit"].hash = $x86_sha |
               .architecture["arm64"].hash = $arm_sha |
-              .architecture["64bit"].url = "https://github.com/byteowlz/trx/releases/download/v\($version)/trx-v\($version)-x86_64-pc-windows-msvc.zip" |
-              .architecture["arm64"].url = "https://github.com/byteowlz/trx/releases/download/v\($version)/trx-v\($version)-aarch64-pc-windows-msvc.zip"' \
+             .architecture["64bit"].url = "https://github.com/cloonix/trx/releases/download/v\($version)/trx-v\($version)-x86_64-pc-windows-msvc.zip" |
+               .architecture["arm64"].url = "https://github.com/cloonix/trx/releases/download/v\($version)/trx-v\($version)-aarch64-pc-windows-msvc.zip"' \
              dist/scoop/trx.json > dist/scoop/trx.json.tmp
           mv dist/scoop/trx.json.tmp dist/scoop/trx.json
 
@@ -230,13 +230,13 @@ jobs:
           	pkgdesc = Minimal git-backed issue tracker (prebuilt binary)
           	pkgver = ${VERSION}
           	pkgrel = 1
-          	url = https://github.com/byteowlz/trx
+           	url = https://github.com/cloonix/trx
           	arch = x86_64
           	license = MIT
           	provides = trx
           	conflicts = trx
           	conflicts = trx-git
-          	source = https://github.com/byteowlz/trx/releases/download/v${VERSION}/trx-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz
+          	source = https://github.com/cloonix/trx/releases/download/v${VERSION}/trx-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz
           	sha256sums = ${LINUX_X86_SHA}
 
           pkgname = trx-bin

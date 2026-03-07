@@ -1,5 +1,5 @@
 # trx configuration
-# Schema: https://raw.githubusercontent.com/byteowlz/schemas/main/trx/trx.config.schema.json
+# Schema: https://raw.githubusercontent.com/cloonix/schemas/main/trx/trx.config.schema.json
 
 # Issue ID prefix (e.g., "trx", "myproject")
 prefix = "trx"

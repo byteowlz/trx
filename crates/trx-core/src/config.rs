@@ -144,7 +144,7 @@ impl Config {
     /// Generate a default config file with comments
     pub fn default_with_comments() -> String {
         r#"# trx configuration
-# See schema at: https://raw.githubusercontent.com/byteowlz/schemas/main/trx/trx.config.schema.json
+# See schema at: https://raw.githubusercontent.com/cloonix/schemas/main/trx/trx.config.schema.json
 
 # Storage format version (v1 = JSONL, v2 = CRDT)
 # Use 'trx migrate' to switch between versions

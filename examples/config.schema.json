@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://raw.githubusercontent.com/byteowlz/schemas/main/trx/trx.config.schema.json",
+  "$id": "https://raw.githubusercontent.com/cloonix/schemas/main/trx/trx.config.schema.json",
   "title": "trx Configuration",
   "description": "Configuration file for trx issue tracker (.trx/config.toml)",
   "type": "object",

@@ -5,9 +5,9 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.2.2"
 edition = "2024"
-authors = ["byteowlz"]
+authors = ["cloonix"]
 license = "MIT"
-repository = "https://github.com/byteowlz/trx"
+repository = "https://github.com/cloonix/trx"
 description = "Minimal git-backed issue tracker with TUI viewer"
 
 [workspace.dependencies]

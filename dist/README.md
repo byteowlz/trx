@@ -41,7 +41,7 @@ To create a tap:
 ```bash
 # Create a new tap repository: homebrew-tap
 # Add the formula to Formula/trx.rb
-# Users install with: brew install byteowlz/tap/trx
+# Users install with: brew install cloonix/tap/trx
 ```
 
 Or submit to homebrew-core for wider distribution.
@@ -55,7 +55,7 @@ To create a bucket:
 ```bash
 # Create a new bucket repository: scoop-bucket
 # Add trx.json to the bucket directory
-# Users install with: scoop bucket add byteowlz https://github.com/byteowlz/scoop-bucket && scoop install trx
+# Users install with: scoop bucket add cloonix https://github.com/cloonix/scoop-bucket && scoop install trx
 ```
 
 ## Manual Installation
