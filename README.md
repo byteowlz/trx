@@ -8,24 +8,24 @@ trx is a minimal, git-native issue tracker focused on simplicity and low overhea
 
 ## Installation
 
-### Homebrew (macOS and Linux)
+### Quick install script
 
 ```bash
-brew tap byteowlz/tap
-brew install trx
+curl -fsSL https://raw.githubusercontent.com/byteowlz/trx/master/install.sh | bash
 ```
 
-### Arch Linux (AUR)
+### Package managers
 
 ```bash
+# Homebrew (macOS/Linux)
+brew tap byteowlz/tap
+brew install trx
+
+# Arch Linux (AUR)
 yay -S trx-bin
 ```
 
-### Pre-built Binaries
-
-Download from [GitHub Releases](https://github.com/byteowlz/trx/releases).
-
-### Build from Source
+### From source
 
 ```bash
 git clone https://github.com/byteowlz/trx.git
@@ -39,14 +39,6 @@ cargo build --release
 - Git-native: all data tracked in version control
 - Conflict-free merging with CRDT support (automerge)
 - Easy to understand and extend
-
-## Installation
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/byteowlz/trx/master/install.sh | bash
-```
-
-Or build from source with `cargo install --path crates/trx-cli`.
 
 ## Architecture
 
