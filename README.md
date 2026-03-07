@@ -43,7 +43,7 @@ cargo build --release
 ## Installation
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/cloonix/trx/master/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/byteowlz/trx/master/install.sh | bash
 ```
 
 Or build from source with `cargo install --path crates/trx-cli`.

@@ -2,14 +2,14 @@
 # trx installer - Install trx issue tracker binaries to user space
 #
 # Quick install:
-#   curl -fsSL https://raw.githubusercontent.com/cloonix/trx/master/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/byteowlz/trx/master/install.sh | bash
 #
 # With options:
-#   curl -fsSL https://raw.githubusercontent.com/cloonix/trx/master/install.sh | bash -s -- --version 0.2.1
-#   curl -fsSL https://raw.githubusercontent.com/cloonix/trx/master/install.sh | bash -s -- --prefix ~/bin
+#   curl -fsSL https://raw.githubusercontent.com/byteowlz/trx/master/install.sh | bash -s -- --version 0.2.1
+#   curl -fsSL https://raw.githubusercontent.com/byteowlz/trx/master/install.sh | bash -s -- --prefix ~/bin
 #
 # Or download and run:
-#   curl -fsSL https://raw.githubusercontent.com/cloonix/trx/master/install.sh > install.sh
+#   curl -fsSL https://raw.githubusercontent.com/byteowlz/trx/master/install.sh > install.sh
 #   chmod +x install.sh
 #   ./install.sh [--version X.Y.Z] [--prefix DIR] [--uninstall]
 
@@ -23,7 +23,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Configuration
-REPO="cloonix/trx"
+REPO="byteowlz/trx"
 DEFAULT_PREFIX="$HOME/.local/bin"
 INSTALL_PREFIX="${TRX_INSTALL_PREFIX:-$DEFAULT_PREFIX}"
 VERSION="${TRX_VERSION:-latest}"
@@ -62,10 +62,10 @@ Environment Variables:
 
 Examples:
     # Install latest version
-    curl -fsSL https://raw.githubusercontent.com/cloonix/trx/master/install.sh | bash
+    curl -fsSL https://raw.githubusercontent.com/byteowlz/trx/master/install.sh | bash
 
     # Install specific version
-    curl -fsSL https://raw.githubusercontent.com/cloonix/trx/master/install.sh | bash -s -- --version 0.2.1
+    curl -fsSL https://raw.githubusercontent.com/byteowlz/trx/master/install.sh | bash -s -- --version 0.2.1
 
     # Install to custom directory
     ./install.sh --prefix ~/bin
@@ -366,7 +366,7 @@ show_next_steps() {
     
     # Show uninstall instructions
     echo "To uninstall, run:"
-    echo "  $ curl -fsSL https://raw.githubusercontent.com/cloonix/trx/master/install.sh | bash -s -- --uninstall"
+    echo "  $ curl -fsSL https://raw.githubusercontent.com/byteowlz/trx/master/install.sh | bash -s -- --uninstall"
     echo
 }
 
