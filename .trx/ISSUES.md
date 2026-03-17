@@ -43,6 +43,12 @@ For long issue text, allow trx create/update to read description from --descript
 
 ## Closed
 
+- [trx-y1gr] Agent Ergonomics Pack: planning, dependency UX, and bulk authoring (closed 2026-03-17)
+- [trx-ne4f] Feature: trx create/update support external editor workflow for long descriptions (closed 2026-03-17)
+- [trx-btfs] Feature: add trx plan import for epic+children scaffolding from Markdown/YAML (closed 2026-03-17)
+- [trx-pe3m] Feature: trx create many (batch mode) from stdin/JSON for scripting agents (closed 2026-03-17)
+- [trx-80by] Feature: ergonomic dependency commands with explicit direction (block/by) (closed 2026-03-17)
+- [trx-yy3z] Bug: trx dep add mutates existing parent_child relationship type to blocks (closed 2026-03-17)
 - [trx-twga] Auto-resolve ISSUES.md merge conflicts (closed 2026-02-19)
 - [trx-gexn] print status (open/closed/etc) when running trx list (closed 2026-01-05)
 - [trx-7eq.3] Migration docs and byt integration (closed 2026-01-05)
