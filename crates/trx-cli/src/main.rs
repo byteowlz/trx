@@ -49,6 +49,10 @@ enum Commands {
         /// Parent issue ID (for child issues)
         #[arg(long)]
         parent: Option<String>,
+
+        /// Open $EDITOR for description
+        #[arg(long)]
+        edit: bool,
     },
 
     /// List issues
@@ -96,6 +100,10 @@ enum Commands {
         /// New description
         #[arg(short, long)]
         description: Option<String>,
+
+        /// Open $EDITOR for description
+        #[arg(long)]
+        edit: bool,
     },
 
     /// Close an issue
@@ -115,6 +123,23 @@ enum Commands {
     Dep {
         #[command(subcommand)]
         command: DepCommands,
+    },
+
+    /// Batch-create issues from JSON (stdin or file)
+    CreateMany {
+        /// Path to JSON file (use "-" for stdin)
+        #[arg(long = "json-input")]
+        json_input: String,
+
+        /// Preview without creating
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Import a plan file to create an epic with children
+    Plan {
+        #[command(subcommand)]
+        command: PlanCommands,
     },
 
     /// Git add and commit .trx/
@@ -258,10 +283,58 @@ enum DepCommands {
         blocks: String,
     },
 
+    /// Mark an issue as blocked by one or more blockers
+    Block {
+        /// The issue that is blocked
+        id: String,
+
+        /// Blocker issue ID(s), comma-separated
+        #[arg(long)]
+        by: String,
+    },
+
+    /// Remove blockers from an issue
+    Unblock {
+        /// The issue to unblock
+        id: String,
+
+        /// Blocker issue ID(s) to remove, comma-separated
+        #[arg(long)]
+        by: String,
+    },
+
     /// Show dependency tree
     Tree {
         /// Issue ID
         id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum PlanCommands {
+    /// Import a plan file to create an epic with children
+    Import {
+        /// Path to plan file (Markdown or JSON)
+        path: String,
+
+        /// Epic title (required for Markdown input)
+        #[arg(long)]
+        epic: Option<String>,
+
+        /// Epic priority
+        #[arg(long, default_value = "2")]
+        priority: u8,
+
+        /// Preview without creating
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Print example plan files (Markdown and JSON)
+    Example {
+        /// Format to show: "md", "json", or "all" (default)
+        #[arg(default_value = "all")]
+        format: String,
     },
 }
 
@@ -276,7 +349,8 @@ fn main() -> Result<()> {
             priority,
             description,
             parent,
-        } => commands::create(&title, &issue_type, priority, description, parent, cli.json),
+            edit,
+        } => commands::create(&title, &issue_type, priority, description, parent, edit, cli.json),
         Commands::List {
             status,
             issue_type,
@@ -290,13 +364,29 @@ fn main() -> Result<()> {
             priority,
             title,
             description,
-        } => commands::update(&id, status, priority, title, description, cli.json),
+            edit,
+        } => commands::update(&id, status, priority, title, description, edit, cli.json),
         Commands::Close { id, reason } => commands::close(&id, reason, cli.json),
         Commands::Ready => commands::ready(cli.json),
         Commands::Dep { command } => match command {
             DepCommands::Add { id, blocks } => commands::dep_add(&id, &blocks, cli.json),
             DepCommands::Rm { id, blocks } => commands::dep_rm(&id, &blocks, cli.json),
+            DepCommands::Block { id, by } => commands::dep_block(&id, &by, cli.json),
+            DepCommands::Unblock { id, by } => commands::dep_unblock(&id, &by, cli.json),
             DepCommands::Tree { id } => commands::dep_tree(&id, cli.json),
+        },
+        Commands::CreateMany {
+            json_input,
+            dry_run,
+        } => commands::create_many(&json_input, dry_run, cli.json),
+        Commands::Plan { command } => match command {
+            PlanCommands::Import {
+                path,
+                epic,
+                priority,
+                dry_run,
+            } => commands::plan_import(&path, epic, priority, dry_run, cli.json),
+            PlanCommands::Example { format } => commands::plan_example(&format),
         },
         Commands::Sync { message } => commands::sync(message),
         Commands::Migrate {

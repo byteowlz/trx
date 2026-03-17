@@ -1,0 +1,35 @@
+{
+  "todos": [
+    {
+      "id": "yy3z",
+      "content": "trx-yy3z [P1 bug]: Fix dep add mutating parent_child to blocks",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "80by",
+      "content": "trx-80by [P2]: Ergonomic dep commands (block/unblock --by)",
+      "status": "completed",
+      "priority": "medium"
+    },
+    {
+      "id": "pe3m",
+      "content": "trx-pe3m [P2]: Batch create from stdin/JSON",
+      "status": "completed",
+      "priority": "medium"
+    },
+    {
+      "id": "btfs",
+      "content": "trx-btfs [P2]: Plan import for epic+children scaffolding",
+      "status": "completed",
+      "priority": "medium"
+    },
+    {
+      "id": "ne4f",
+      "content": "trx-ne4f [P3]: External editor workflow for create/update",
+      "status": "completed",
+      "priority": "low"
+    }
+  ],
+  "updated_at": "2026-03-17T17:35:24.813Z"
+}

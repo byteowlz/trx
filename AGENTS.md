@@ -170,6 +170,8 @@ struct Cli {
 
 ## Issue Tracking (trx)
 
+**IMPORTANT**: `trx` is installed globally at `/home/wismut/.local/bin/trx`. Always use `trx` directly — never `cargo run -p trx-cli --`.
+
 ```bash
 trx ready              # Show unblocked issues
 trx create "Title" -t task -p 2   # Create issue (types: bug/feature/task/epic/chore, priority: 0-4)

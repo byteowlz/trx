@@ -228,12 +228,7 @@ impl CrdtStore {
 
                     if let (Some(issue_id), Some(depends_on_id)) = (issue_id, depends_on_id) {
                         let dep_type = dep_type_str
-                            .and_then(|t| match t.as_str() {
-                                "blocks" => Some(crate::DependencyType::Blocks),
-                                "parent_child" => Some(crate::DependencyType::ParentChild),
-                                "related" => Some(crate::DependencyType::Related),
-                                _ => None,
-                            })
+                            .and_then(|t| t.parse::<crate::DependencyType>().ok())
                             .unwrap_or_default();
 
                         let created_at = created_at_str

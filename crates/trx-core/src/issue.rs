@@ -112,8 +112,24 @@ impl std::fmt::Display for DependencyType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DependencyType::Blocks => write!(f, "blocks"),
-            DependencyType::ParentChild => write!(f, "parent-child"),
+            DependencyType::ParentChild => write!(f, "parent_child"),
             DependencyType::Related => write!(f, "related"),
+        }
+    }
+}
+
+impl std::str::FromStr for DependencyType {
+    type Err = crate::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "blocks" => Ok(DependencyType::Blocks),
+            "parent_child" | "parent-child" => Ok(DependencyType::ParentChild),
+            "related" => Ok(DependencyType::Related),
+            _ => Err(crate::Error::Other(format!(
+                "Invalid dependency type: {}",
+                s
+            ))),
         }
     }
 }
@@ -287,7 +303,18 @@ impl Issue {
     }
 
     /// Add a dependency
-    pub fn add_dependency(&mut self, depends_on_id: String, dep_type: DependencyType) {
+    ///
+    /// If a dependency to the same `depends_on_id` already exists, it is preserved
+    /// (no duplicate created). Returns true if the dependency was added.
+    pub fn add_dependency(&mut self, depends_on_id: String, dep_type: DependencyType) -> bool {
+        // Check for existing dependency to the same target
+        if self
+            .dependencies
+            .iter()
+            .any(|d| d.depends_on_id == depends_on_id)
+        {
+            return false;
+        }
         let dep = Dependency {
             issue_id: self.id.clone(),
             depends_on_id,
@@ -297,6 +324,7 @@ impl Issue {
         };
         self.dependencies.push(dep);
         self.updated_at = Utc::now();
+        true
     }
 
     /// Remove a dependency
@@ -313,6 +341,51 @@ impl Issue {
             .filter(|d| d.dep_type == DependencyType::Blocks)
             .map(|d| d.depends_on_id.as_str())
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_add_dependency_prevents_duplicates() {
+        let mut issue = Issue::new("trx-001".into(), "Test".into());
+        assert!(issue.add_dependency("trx-parent".into(), DependencyType::ParentChild));
+        // Second add to same target should be rejected
+        assert!(!issue.add_dependency("trx-parent".into(), DependencyType::Blocks));
+        assert_eq!(issue.dependencies.len(), 1);
+        assert_eq!(issue.dependencies[0].dep_type, DependencyType::ParentChild);
+    }
+
+    #[test]
+    fn test_parent_child_survives_dep_add_to_different_target() {
+        let mut issue = Issue::new("trx-001".into(), "Test".into());
+        issue.add_dependency("trx-parent".into(), DependencyType::ParentChild);
+        issue.add_dependency("trx-blocker".into(), DependencyType::Blocks);
+
+        assert_eq!(issue.dependencies.len(), 2);
+        assert_eq!(issue.dependencies[0].dep_type, DependencyType::ParentChild);
+        assert_eq!(issue.dependencies[1].dep_type, DependencyType::Blocks);
+    }
+
+    #[test]
+    fn test_dependency_type_display_roundtrip() {
+        for dt in [
+            DependencyType::Blocks,
+            DependencyType::ParentChild,
+            DependencyType::Related,
+        ] {
+            let s = dt.to_string();
+            let parsed: DependencyType = s.parse().unwrap();
+            assert_eq!(dt, parsed);
+        }
+    }
+
+    #[test]
+    fn test_dependency_type_parse_accepts_hyphen() {
+        let dt: DependencyType = "parent-child".parse().unwrap();
+        assert_eq!(dt, DependencyType::ParentChild);
     }
 }
 
