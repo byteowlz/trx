@@ -2,28 +2,7 @@
 
 ## Open
 
-### [trx-p7y6] trx ready should show all unblocked issues, not just epics - leaf feature/task issues with no blockers should appear (P1, bug)
-
-### [trx-f4ck] trx list --epic <id> to show all children/descendants of an epic (P2, feature)
-
-### [trx-tkmz] trx list --json should include resolved parent, blocked_by, blocks fields - currently these are null even when dependencies exist (P2, bug)
-
 ### [trx-pa3y] Custom ID prefix on create - 'trx create --id mmry-lrn' to control the generated issue ID prefix instead of random (P2, feature)
-
-### [trx-nst7] Add list filters (status/type/priority/search) (P2, feature)
-Improve trx list ergonomics with flags like --status open,closed --type bug,task --priority 0..4 and --search text. Support combined filters.
-
-### [trx-jtmw] Show reverse dependencies in trx show (P2, feature)
-Add optional output (e.g., --reverse or default section) that lists issues blocked by this one and parent/child relationships, so epics can show their children.
-
-### [trx-hyv9] Implement dependency tree rendering (P2, feature)
-trx dep tree currently prints '(not yet implemented)'. Add traversal to display blockers/children with type labels and detect cycles.
-
-### [trx-s0t.4] TUI: Multi-repo workspace support (P2, task)
-Load workspace.yaml with multiple repos. Aggregate view across repos. Support beads-viewer workspace format for compatibility.
-
-### [trx-s0t.3] TUI: Dependency graph visualization (P2, task)
-ASCII/Unicode graph view showing dependency relationships. Highlight cycles, critical path, blocked chains.
 
 ### [trx-cgs7] trx update should accept --description from stdin when value is '-', for adding long descriptions to existing issues (P3, feature)
 
@@ -32,17 +11,21 @@ ASCII/Unicode graph view showing dependency relationships. Highlight cycles, cri
 ### [trx-bqnp] Add trx sync options for message and dry-run (P3, feature)
 Support --message to set commit message and --dry-run or --no-commit to inspect staged changes without committing.
 
-### [trx-mb7y] Expose blockers in trx ready output (P3, feature)
-When an issue is blocked, show which dependencies are open to explain why it isn't ready.
-
 ### [trx-gt71] Add --clear for update fields (P3, feature)
 Allow trx update to clear optional fields (description, parent, labels) explicitly, e.g., --clear description.
 
-### [trx-vtsw] Support description input from file or stdin (P3, feature)
-For long issue text, allow trx create/update to read description from --description-file or --description - (stdin).
-
 ## Closed
 
+- [trx-f4ck] trx list --epic <id> to show all children/descendants of an epic (closed 2026-03-17)
+- [trx-tkmz] trx list --json should include resolved parent, blocked_by, blocks fields - currently these are null even when dependencies exist (closed 2026-03-17)
+- [trx-nst7] Add list filters (status/type/priority/search) (closed 2026-03-17)
+- [trx-jtmw] Show reverse dependencies in trx show (closed 2026-03-17)
+- [trx-mb7y] Expose blockers in trx ready output (closed 2026-03-17)
+- [trx-p7y6] trx ready should show all unblocked issues, not just epics - leaf feature/task issues with no blockers should appear (closed 2026-03-17)
+- [trx-s0t.4] TUI: Multi-repo workspace support (closed 2026-03-17)
+- [trx-s0t.3] TUI: Dependency graph visualization (closed 2026-03-17)
+- [trx-vtsw] Support description input from file or stdin (closed 2026-03-17)
+- [trx-hyv9] Implement dependency tree rendering (closed 2026-03-17)
 - [trx-y1gr] Agent Ergonomics Pack: planning, dependency UX, and bulk authoring (closed 2026-03-17)
 - [trx-ne4f] Feature: trx create/update support external editor workflow for long descriptions (closed 2026-03-17)
 - [trx-btfs] Feature: add trx plan import for epic+children scaffolding from Markdown/YAML (closed 2026-03-17)
