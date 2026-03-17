@@ -57,13 +57,25 @@ enum Commands {
 
     /// List issues
     List {
-        /// Filter by status
+        /// Filter by status (open, in_progress, blocked, closed)
         #[arg(short, long)]
         status: Option<String>,
 
-        /// Filter by type
+        /// Filter by type (bug, feature, task, epic, chore)
         #[arg(short = 't', long)]
         issue_type: Option<String>,
+
+        /// Filter by priority (0-4)
+        #[arg(short = 'P', long)]
+        priority: Option<u8>,
+
+        /// Search title and description
+        #[arg(long)]
+        search: Option<String>,
+
+        /// Show children/descendants of an epic
+        #[arg(long)]
+        epic: Option<String>,
 
         /// Show all including closed
         #[arg(short, long)]
@@ -354,9 +366,12 @@ fn main() -> Result<()> {
         Commands::List {
             status,
             issue_type,
+            priority,
+            search,
+            epic,
             all,
             limit,
-        } => commands::list(status, issue_type, all, limit, cli.json),
+        } => commands::list(status, issue_type, priority, search, epic, all, limit, cli.json),
         Commands::Show { id } => commands::show(&id, cli.json),
         Commands::Update {
             id,

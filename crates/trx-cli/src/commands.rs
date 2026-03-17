@@ -67,16 +67,50 @@ pub fn create(
 pub fn list(
     status: Option<String>,
     issue_type: Option<String>,
+    priority: Option<u8>,
+    search: Option<String>,
+    epic: Option<String>,
     all: bool,
     limit: Option<usize>,
     json: bool,
 ) -> Result<()> {
     let store = UnifiedStore::open()?;
-    let mut issues: Vec<_> = if all {
+
+    let mut issues: Vec<_> = if epic.is_some() || all {
         store.list(false)
     } else {
         store.list_open()
     };
+
+    // Filter by epic: show the epic and all descendants (by ID prefix or parent_child dep)
+    if let Some(ref epic_id) = epic {
+        store
+            .get(epic_id)
+            .ok_or_else(|| anyhow::anyhow!("Epic not found: {}", epic_id))?;
+
+        let epic_prefix = format!("{}.", epic_id);
+
+        // Collect all descendant IDs via any dependency pointing to this epic (BFS)
+        let all = store.list(false);
+        let mut descendant_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut queue = vec![epic_id.clone()];
+
+        while let Some(parent_id) = queue.pop() {
+            for issue in &all {
+                if issue.dependencies.iter().any(|d| d.depends_on_id == parent_id)
+                    && descendant_ids.insert(issue.id.clone())
+                {
+                    queue.push(issue.id.clone());
+                }
+            }
+        }
+
+        issues.retain(|i| {
+            i.id == *epic_id
+                || i.id.starts_with(&epic_prefix)
+                || descendant_ids.contains(&i.id)
+        });
+    }
 
     // Filter by status
     if let Some(ref s) = status {
@@ -88,6 +122,23 @@ pub fn list(
     if let Some(ref t) = issue_type {
         let itype: IssueType = t.parse()?;
         issues.retain(|i| i.issue_type == itype);
+    }
+
+    // Filter by priority
+    if let Some(p) = priority {
+        issues.retain(|i| i.priority == p);
+    }
+
+    // Filter by search (title + description, case-insensitive)
+    if let Some(ref q) = search {
+        let q_lower = q.to_lowercase();
+        issues.retain(|i| {
+            i.title.to_lowercase().contains(&q_lower)
+                || i.description
+                    .as_ref()
+                    .is_some_and(|d| d.to_lowercase().contains(&q_lower))
+                || i.id.to_lowercase().contains(&q_lower)
+        });
     }
 
     // Sort by priority, then by creation date
@@ -103,7 +154,62 @@ pub fn list(
     }
 
     if json {
-        println!("{}", serde_json::to_string(&issues)?);
+        // Enrich JSON output with resolved fields (trx-tkmz)
+        let all_issues = store.list(false);
+        let mut output: Vec<serde_json::Value> = Vec::new();
+
+        for issue in &issues {
+            let mut val = serde_json::to_value(issue)?;
+            let obj = val.as_object_mut().unwrap();
+
+            // Resolve parent
+            if let Some(parent_dep) = issue.dependencies.iter().find(|d| d.dep_type == DependencyType::ParentChild) {
+                obj.insert("parent".into(), parent_dep.depends_on_id.clone().into());
+            }
+
+            // Resolve blocked_by
+            let blocked_by: Vec<&str> = issue
+                .dependencies
+                .iter()
+                .filter(|d| d.dep_type == DependencyType::Blocks)
+                .map(|d| d.depends_on_id.as_str())
+                .collect();
+            if !blocked_by.is_empty() {
+                obj.insert("blocked_by".into(), serde_json::to_value(&blocked_by)?);
+            }
+
+            // Resolve blocks (reverse: who depends on this issue with blocks type)
+            let blocks: Vec<&str> = all_issues
+                .iter()
+                .filter(|i| {
+                    i.dependencies
+                        .iter()
+                        .any(|d| d.depends_on_id == issue.id && d.dep_type == DependencyType::Blocks)
+                })
+                .map(|i| i.id.as_str())
+                .collect();
+            if !blocks.is_empty() {
+                obj.insert("blocks".into(), serde_json::to_value(&blocks)?);
+            }
+
+            // Resolve children
+            let children: Vec<&str> = all_issues
+                .iter()
+                .filter(|i| {
+                    i.dependencies
+                        .iter()
+                        .any(|d| d.depends_on_id == issue.id && d.dep_type == DependencyType::ParentChild)
+                })
+                .map(|i| i.id.as_str())
+                .collect();
+            if !children.is_empty() {
+                obj.insert("children".into(), serde_json::to_value(&children)?);
+            }
+
+            output.push(val);
+        }
+
+        println!("{}", serde_json::to_string(&output)?);
     } else if issues.is_empty() {
         println!("No issues found");
     } else {
@@ -135,8 +241,66 @@ pub fn show(id: &str, json: bool) -> Result<()> {
         .get(id)
         .ok_or_else(|| anyhow::anyhow!("Issue not found: {}", id))?;
 
+    // Find reverse dependencies: issues that depend on this one
+    let all_issues = store.list(false);
+    let reverse_deps: Vec<_> = all_issues
+        .iter()
+        .filter(|i| i.dependencies.iter().any(|d| d.depends_on_id == id))
+        .collect();
+
+    // Find children (issues with parent_child dep pointing to this issue)
+    let children: Vec<_> = reverse_deps
+        .iter()
+        .filter(|i| {
+            i.dependencies
+                .iter()
+                .any(|d| d.depends_on_id == id && d.dep_type == DependencyType::ParentChild)
+        })
+        .collect();
+
+    // Find issues blocked by this one
+    let blocked_by_this: Vec<_> = reverse_deps
+        .iter()
+        .filter(|i| {
+            i.dependencies
+                .iter()
+                .any(|d| d.depends_on_id == id && d.dep_type == DependencyType::Blocks)
+        })
+        .collect();
+
     if json {
-        println!("{}", serde_json::to_string_pretty(issue)?);
+        let mut val = serde_json::to_value(issue)?;
+        let obj = val.as_object_mut().unwrap();
+
+        // Add resolved parent
+        if let Some(parent_dep) = issue.dependencies.iter().find(|d| d.dep_type == DependencyType::ParentChild) {
+            obj.insert("parent".into(), parent_dep.depends_on_id.clone().into());
+        }
+
+        // Add resolved blocked_by (issues this one depends on as blocks)
+        let blocked_by: Vec<_> = issue
+            .dependencies
+            .iter()
+            .filter(|d| d.dep_type == DependencyType::Blocks)
+            .map(|d| d.depends_on_id.as_str())
+            .collect();
+        if !blocked_by.is_empty() {
+            obj.insert("blocked_by".into(), serde_json::to_value(&blocked_by)?);
+        }
+
+        // Add children
+        if !children.is_empty() {
+            let child_ids: Vec<_> = children.iter().map(|i| i.id.as_str()).collect();
+            obj.insert("children".into(), serde_json::to_value(&child_ids)?);
+        }
+
+        // Add blocks (issues blocked by this one)
+        if !blocked_by_this.is_empty() {
+            let blocks_ids: Vec<_> = blocked_by_this.iter().map(|i| i.id.as_str()).collect();
+            obj.insert("blocks".into(), serde_json::to_value(&blocks_ids)?);
+        }
+
+        println!("{}", serde_json::to_string_pretty(&val)?);
     } else {
         println!("{} {}", issue.id.cyan().bold(), issue.title.bold());
         println!();
@@ -157,6 +321,37 @@ pub fn show(id: &str, json: bool) -> Result<()> {
             println!("{}", "Dependencies:".bold());
             for dep in &issue.dependencies {
                 println!("  {} {} {}", dep.issue_id, dep.dep_type, dep.depends_on_id);
+            }
+        }
+
+        if !children.is_empty() {
+            println!();
+            println!("{}", "Children:".bold());
+            for child in &children {
+                let status_indicator = if child.status.is_open() { "○" } else { "●" };
+                println!(
+                    "  {} {} [P{}] [{}] {}",
+                    status_indicator,
+                    child.id.cyan(),
+                    child.priority,
+                    child.issue_type.to_string().blue(),
+                    child.title
+                );
+            }
+        }
+
+        if !blocked_by_this.is_empty() {
+            println!();
+            println!("{}", "Blocks:".bold());
+            for blocked in &blocked_by_this {
+                let status_indicator = if blocked.status.is_open() { "○" } else { "●" };
+                println!(
+                    "  {} {} [P{}] {}",
+                    status_indicator,
+                    blocked.id.cyan(),
+                    blocked.priority,
+                    blocked.title
+                );
             }
         }
     }
@@ -228,7 +423,8 @@ pub fn close(id: &str, reason: Option<String>, json: bool) -> Result<()> {
 
 pub fn ready(json: bool) -> Result<()> {
     let store = UnifiedStore::open()?;
-    let open_issues: Vec<_> = store.list_open();
+    let all_issues: Vec<_> = store.list(false);
+    let open_issues: Vec<_> = all_issues.iter().filter(|i| i.status.is_open()).copied().collect();
     let graph = IssueGraph::from_issues(&open_issues);
     let mut ready = graph.ready_issues(&open_issues);
 
@@ -236,12 +432,22 @@ pub fn ready(json: bool) -> Result<()> {
     ready.sort_by_key(|a| a.priority);
 
     if json {
-        println!("{}", serde_json::to_string(&ready)?);
+        let mut output = Vec::new();
+
+        for issue in &ready {
+            let mut val = serde_json::to_value(issue)?;
+            if let Some(parent_dep) = issue.dependencies.iter().find(|d| d.dep_type == DependencyType::ParentChild) {
+                val.as_object_mut().unwrap().insert("parent".into(), parent_dep.depends_on_id.clone().into());
+            }
+            output.push(val);
+        }
+
+        println!("{}", serde_json::to_string(&output)?);
     } else if ready.is_empty() {
         println!("No ready issues");
     } else {
         println!("{}", "Ready issues (unblocked):".bold());
-        for issue in ready {
+        for issue in &ready {
             println!(
                 "{} [P{}] [{}] - {}",
                 issue.id.cyan(),
@@ -249,6 +455,36 @@ pub fn ready(json: bool) -> Result<()> {
                 issue.issue_type.to_string().blue(),
                 issue.title
             );
+        }
+
+        // Show blocked issues with their blockers
+        let ready_ids: std::collections::HashSet<_> = ready.iter().map(|i| i.id.as_str()).collect();
+        let blocked: Vec<_> = open_issues
+            .iter()
+            .filter(|i| !ready_ids.contains(i.id.as_str()))
+            .collect();
+
+        if !blocked.is_empty() {
+            println!();
+            println!("{}", "Blocked issues:".bold());
+            for issue in blocked {
+                let blockers: Vec<String> = issue
+                    .dependencies
+                    .iter()
+                    .filter(|d| d.dep_type == DependencyType::Blocks)
+                    .filter(|d| open_issues.iter().any(|i| i.id == d.depends_on_id))
+                    .map(|d| d.depends_on_id.clone())
+                    .collect();
+                println!(
+                    "{} [P{}] [{}] - {} {} {}",
+                    issue.id.cyan(),
+                    issue.priority,
+                    issue.issue_type.to_string().blue(),
+                    issue.title,
+                    "blocked by".red(),
+                    blockers.join(", ").red()
+                );
+            }
         }
     }
 

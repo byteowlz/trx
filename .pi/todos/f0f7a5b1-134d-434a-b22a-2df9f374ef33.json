@@ -1,35 +1,41 @@
 {
   "todos": [
     {
-      "id": "yy3z",
-      "content": "trx-yy3z [P1 bug]: Fix dep add mutating parent_child to blocks",
+      "id": "p7y6",
+      "content": "trx-p7y6 [P1 bug]: trx ready shows all unblocked issues + blocked section",
       "status": "completed",
       "priority": "high"
     },
     {
-      "id": "80by",
-      "content": "trx-80by [P2]: Ergonomic dep commands (block/unblock --by)",
+      "id": "mb7y",
+      "content": "trx-mb7y [P3]: Expose blockers in trx ready output",
       "status": "completed",
       "priority": "medium"
     },
     {
-      "id": "pe3m",
-      "content": "trx-pe3m [P2]: Batch create from stdin/JSON",
+      "id": "jtmw",
+      "content": "trx-jtmw [P2]: Show reverse deps (children/blocks) in trx show",
       "status": "completed",
       "priority": "medium"
     },
     {
-      "id": "btfs",
-      "content": "trx-btfs [P2]: Plan import for epic+children scaffolding",
+      "id": "nst7",
+      "content": "trx-nst7 [P2]: List filters (--priority, --search)",
       "status": "completed",
       "priority": "medium"
     },
     {
-      "id": "ne4f",
-      "content": "trx-ne4f [P3]: External editor workflow for create/update",
+      "id": "tkmz",
+      "content": "trx-tkmz [P2 bug]: JSON output enriched with parent/blocked_by/blocks/children",
       "status": "completed",
-      "priority": "low"
+      "priority": "medium"
+    },
+    {
+      "id": "f4ck",
+      "content": "trx-f4ck [P2]: trx list --epic <id> shows all descendants",
+      "status": "completed",
+      "priority": "medium"
     }
   ],
-  "updated_at": "2026-03-17T17:35:24.813Z"
+  "updated_at": "2026-03-17T18:49:36.440Z"
 }
