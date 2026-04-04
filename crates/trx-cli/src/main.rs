@@ -362,7 +362,15 @@ fn main() -> Result<()> {
             description,
             parent,
             edit,
-        } => commands::create(&title, &issue_type, priority, description, parent, edit, cli.json),
+        } => commands::create(
+            &title,
+            &issue_type,
+            priority,
+            description,
+            parent,
+            edit,
+            cli.json,
+        ),
         Commands::List {
             status,
             issue_type,
@@ -371,7 +379,9 @@ fn main() -> Result<()> {
             epic,
             all,
             limit,
-        } => commands::list(status, issue_type, priority, search, epic, all, limit, cli.json),
+        } => commands::list(
+            status, issue_type, priority, search, epic, all, limit, cli.json,
+        ),
         Commands::Show { id } => commands::show(&id, cli.json),
         Commands::Update {
             id,

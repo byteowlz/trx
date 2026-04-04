@@ -1,0 +1,89 @@
+{
+  "todos": [
+    {
+      "id": "0a",
+      "content": "Add workspace clippy lints (like octo backend)",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "0b",
+      "content": "Add ast-grep rules (like hstry)",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "0c",
+      "content": "Add chat session IDs field to Issue model",
+      "status": "pending",
+      "priority": "high"
+    },
+    {
+      "id": "0d",
+      "content": "Fix all existing clippy/ast-grep violations",
+      "status": "in_progress",
+      "priority": "high"
+    },
+    {
+      "id": "1",
+      "content": "trx-pa3y: Custom ID prefix on create",
+      "status": "pending",
+      "priority": "medium"
+    },
+    {
+      "id": "2",
+      "content": "trx-jn7s: Date range filters (--created-after/--created-before)",
+      "status": "pending",
+      "priority": "medium"
+    },
+    {
+      "id": "3",
+      "content": "trx-kx6q: --label filter to list",
+      "status": "pending",
+      "priority": "medium"
+    },
+    {
+      "id": "4",
+      "content": "trx-msj1: Cross-repo issue search",
+      "status": "pending",
+      "priority": "medium"
+    },
+    {
+      "id": "5",
+      "content": "trx-yw64: Standardize list/search JSON output",
+      "status": "pending",
+      "priority": "medium"
+    },
+    {
+      "id": "6",
+      "content": "trx-cgs7: --description from stdin",
+      "status": "pending",
+      "priority": "low"
+    },
+    {
+      "id": "7",
+      "content": "trx-gt71: --clear for update fields",
+      "status": "pending",
+      "priority": "low"
+    },
+    {
+      "id": "8",
+      "content": "trx-te7r: trx handover command",
+      "status": "pending",
+      "priority": "low"
+    },
+    {
+      "id": "9",
+      "content": "trx-wfxe: --assignee filter to list",
+      "status": "pending",
+      "priority": "low"
+    },
+    {
+      "id": "10",
+      "content": "trx-bqnp: trx sync --message and --dry-run",
+      "status": "pending",
+      "priority": "low"
+    }
+  ],
+  "updated_at": "2026-04-04T09:21:58.979Z"
+}

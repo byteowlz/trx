@@ -20,6 +20,18 @@ struct AppState {
     store: RwLock<Store>,
 }
 
+impl AppState {
+    fn read_store(&self) -> std::sync::RwLockReadGuard<'_, Store> {
+        // RwLock::read only fails if a thread panicked while holding the lock,
+        // which is unrecoverable. Panic is appropriate here.
+        self.store.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn write_store(&self) -> std::sync::RwLockWriteGuard<'_, Store> {
+        self.store.write().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
 /// Request to create a new issue
 #[derive(Debug, Deserialize)]
 struct CreateIssueRequest {
@@ -126,7 +138,7 @@ async fn list_issues(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(query): axum::extract::Query<ListQuery>,
 ) -> impl IntoResponse {
-    let store = state.store.read().unwrap();
+    let store = state.read_store();
     let include_tombstones = query.include_tombstones.unwrap_or(false);
     let mut issues: Vec<_> = store
         .list(include_tombstones)
@@ -135,17 +147,17 @@ async fn list_issues(
         .collect();
 
     // Filter by status
-    if let Some(status_str) = &query.status {
-        if let Ok(status) = status_str.parse::<Status>() {
-            issues.retain(|i| i.status == status);
-        }
+    if let Some(status_str) = &query.status
+        && let Ok(status) = status_str.parse::<Status>()
+    {
+        issues.retain(|i| i.status == status);
     }
 
     // Filter by type
-    if let Some(type_str) = &query.issue_type {
-        if let Ok(issue_type) = type_str.parse::<IssueType>() {
-            issues.retain(|i| i.issue_type == issue_type);
-        }
+    if let Some(type_str) = &query.issue_type
+        && let Ok(issue_type) = type_str.parse::<IssueType>()
+    {
+        issues.retain(|i| i.issue_type == issue_type);
     }
 
     // Filter by priority
@@ -165,12 +177,12 @@ async fn list_issues(
 
 /// List open issues (unblocked)
 async fn list_ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let store = state.store.read().unwrap();
+    let store = state.read_store();
     let all_open: Vec<_> = store.list_open();
     let ready: Vec<_> = all_open
         .iter()
         .filter(|issue| !issue.is_blocked_by(&all_open))
-        .cloned()
+        .copied()
         .cloned()
         .collect();
 
@@ -182,7 +194,7 @@ async fn get_issue(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let store = state.store.read().unwrap();
+    let store = state.read_store();
     match store.get(&id) {
         Some(issue) => (StatusCode::OK, Json(ApiResponse::ok(issue.clone()))),
         None => (
@@ -197,7 +209,7 @@ async fn create_issue(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateIssueRequest>,
 ) -> impl IntoResponse {
-    let mut store = state.store.write().unwrap();
+    let mut store = state.write_store();
 
     // Get prefix for ID generation
     let prefix = store.prefix().unwrap_or_else(|_| "trx".to_string());
@@ -229,10 +241,10 @@ async fn create_issue(
     if let Some(priority) = req.priority {
         issue.priority = priority.min(4);
     }
-    if let Some(type_str) = req.issue_type {
-        if let Ok(t) = type_str.parse::<IssueType>() {
-            issue.issue_type = t;
-        }
+    if let Some(type_str) = req.issue_type
+        && let Ok(t) = type_str.parse::<IssueType>()
+    {
+        issue.issue_type = t;
     }
     if let Some(labels) = req.labels {
         issue.labels = labels;
@@ -261,7 +273,7 @@ async fn update_issue(
     Path(id): Path<String>,
     Json(req): Json<UpdateIssueRequest>,
 ) -> impl IntoResponse {
-    let mut store = state.store.write().unwrap();
+    let mut store = state.write_store();
 
     let issue = match store.get_mut(&id) {
         Some(i) => i,
@@ -280,18 +292,18 @@ async fn update_issue(
     if let Some(desc) = req.description {
         issue.description = Some(desc);
     }
-    if let Some(status_str) = req.status {
-        if let Ok(status) = status_str.parse::<Status>() {
-            issue.status = status;
-        }
+    if let Some(status_str) = req.status
+        && let Ok(status) = status_str.parse::<Status>()
+    {
+        issue.status = status;
     }
     if let Some(priority) = req.priority {
         issue.priority = priority.min(4);
     }
-    if let Some(type_str) = req.issue_type {
-        if let Ok(t) = type_str.parse::<IssueType>() {
-            issue.issue_type = t;
-        }
+    if let Some(type_str) = req.issue_type
+        && let Ok(t) = type_str.parse::<IssueType>()
+    {
+        issue.issue_type = t;
     }
     if let Some(labels) = req.labels {
         issue.labels = labels;
@@ -321,7 +333,7 @@ async fn close_issue(
     Path(id): Path<String>,
     Json(req): Json<CloseIssueRequest>,
 ) -> impl IntoResponse {
-    let mut store = state.store.write().unwrap();
+    let mut store = state.write_store();
 
     let issue = match store.get_mut(&id) {
         Some(i) => i,
@@ -351,7 +363,7 @@ async fn delete_issue(
     Path(id): Path<String>,
     axum::extract::Query(req): axum::extract::Query<DeleteIssueRequest>,
 ) -> impl IntoResponse {
-    let mut store = state.store.write().unwrap();
+    let mut store = state.write_store();
 
     match store.delete(&id, req.by, req.reason) {
         Ok(()) => (
@@ -385,7 +397,7 @@ async fn add_dependency(
     Path(id): Path<String>,
     Json(req): Json<AddDependencyRequest>,
 ) -> impl IntoResponse {
-    let mut store = state.store.write().unwrap();
+    let mut store = state.write_store();
 
     // Check that target exists
     if store.get(&req.depends_on).is_none() {
@@ -435,7 +447,7 @@ async fn remove_dependency(
     State(state): State<Arc<AppState>>,
     Path((id, dep_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    let mut store = state.store.write().unwrap();
+    let mut store = state.write_store();
 
     let issue = match store.get_mut(&id) {
         Some(i) => i,

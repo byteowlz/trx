@@ -31,3 +31,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # MCP server framework
 mcp-server = "0.1"
 mcp-spec = "0.1"
+
+[lints]
+workspace = true

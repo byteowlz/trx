@@ -7,6 +7,13 @@ use trx_core::{
     generate_id, id::generate_child_id, migrate_v1_to_v2, rollback_v2_to_v1,
 };
 
+/// Helper to get a mutable reference to a JSON object.
+/// Panics only if the value is not an object, which is a programmer error.
+fn obj_mut(val: &mut serde_json::Value) -> &mut serde_json::Map<String, serde_json::Value> {
+    val.as_object_mut()
+        .unwrap_or_else(|| unreachable!("expected JSON object"))
+}
+
 pub fn init(prefix: &str) -> Result<()> {
     let store = Store::init(prefix)?;
     println!(
@@ -92,12 +99,16 @@ pub fn list(
 
         // Collect all descendant IDs via any dependency pointing to this epic (BFS)
         let all = store.list(false);
-        let mut descendant_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut descendant_ids: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         let mut queue = vec![epic_id.clone()];
 
         while let Some(parent_id) = queue.pop() {
             for issue in &all {
-                if issue.dependencies.iter().any(|d| d.depends_on_id == parent_id)
+                if issue
+                    .dependencies
+                    .iter()
+                    .any(|d| d.depends_on_id == parent_id)
                     && descendant_ids.insert(issue.id.clone())
                 {
                     queue.push(issue.id.clone());
@@ -106,9 +117,7 @@ pub fn list(
         }
 
         issues.retain(|i| {
-            i.id == *epic_id
-                || i.id.starts_with(&epic_prefix)
-                || descendant_ids.contains(&i.id)
+            i.id == *epic_id || i.id.starts_with(&epic_prefix) || descendant_ids.contains(&i.id)
         });
     }
 
@@ -160,10 +169,14 @@ pub fn list(
 
         for issue in &issues {
             let mut val = serde_json::to_value(issue)?;
-            let obj = val.as_object_mut().unwrap();
+            let obj = obj_mut(&mut val);
 
             // Resolve parent
-            if let Some(parent_dep) = issue.dependencies.iter().find(|d| d.dep_type == DependencyType::ParentChild) {
+            if let Some(parent_dep) = issue
+                .dependencies
+                .iter()
+                .find(|d| d.dep_type == DependencyType::ParentChild)
+            {
                 obj.insert("parent".into(), parent_dep.depends_on_id.clone().into());
             }
 
@@ -182,9 +195,9 @@ pub fn list(
             let blocks: Vec<&str> = all_issues
                 .iter()
                 .filter(|i| {
-                    i.dependencies
-                        .iter()
-                        .any(|d| d.depends_on_id == issue.id && d.dep_type == DependencyType::Blocks)
+                    i.dependencies.iter().any(|d| {
+                        d.depends_on_id == issue.id && d.dep_type == DependencyType::Blocks
+                    })
                 })
                 .map(|i| i.id.as_str())
                 .collect();
@@ -196,9 +209,9 @@ pub fn list(
             let children: Vec<&str> = all_issues
                 .iter()
                 .filter(|i| {
-                    i.dependencies
-                        .iter()
-                        .any(|d| d.depends_on_id == issue.id && d.dep_type == DependencyType::ParentChild)
+                    i.dependencies.iter().any(|d| {
+                        d.depends_on_id == issue.id && d.dep_type == DependencyType::ParentChild
+                    })
                 })
                 .map(|i| i.id.as_str())
                 .collect();
@@ -270,10 +283,14 @@ pub fn show(id: &str, json: bool) -> Result<()> {
 
     if json {
         let mut val = serde_json::to_value(issue)?;
-        let obj = val.as_object_mut().unwrap();
+        let obj = obj_mut(&mut val);
 
         // Add resolved parent
-        if let Some(parent_dep) = issue.dependencies.iter().find(|d| d.dep_type == DependencyType::ParentChild) {
+        if let Some(parent_dep) = issue
+            .dependencies
+            .iter()
+            .find(|d| d.dep_type == DependencyType::ParentChild)
+        {
             obj.insert("parent".into(), parent_dep.depends_on_id.clone().into());
         }
 
@@ -344,7 +361,11 @@ pub fn show(id: &str, json: bool) -> Result<()> {
             println!();
             println!("{}", "Blocks:".bold());
             for blocked in &blocked_by_this {
-                let status_indicator = if blocked.status.is_open() { "○" } else { "●" };
+                let status_indicator = if blocked.status.is_open() {
+                    "○"
+                } else {
+                    "●"
+                };
                 println!(
                     "  {} {} [P{}] {}",
                     status_indicator,
@@ -424,7 +445,11 @@ pub fn close(id: &str, reason: Option<String>, json: bool) -> Result<()> {
 pub fn ready(json: bool) -> Result<()> {
     let store = UnifiedStore::open()?;
     let all_issues: Vec<_> = store.list(false);
-    let open_issues: Vec<_> = all_issues.iter().filter(|i| i.status.is_open()).copied().collect();
+    let open_issues: Vec<_> = all_issues
+        .iter()
+        .filter(|i| i.status.is_open())
+        .copied()
+        .collect();
     let graph = IssueGraph::from_issues(&open_issues);
     let mut ready = graph.ready_issues(&open_issues);
 
@@ -436,8 +461,12 @@ pub fn ready(json: bool) -> Result<()> {
 
         for issue in &ready {
             let mut val = serde_json::to_value(issue)?;
-            if let Some(parent_dep) = issue.dependencies.iter().find(|d| d.dep_type == DependencyType::ParentChild) {
-                val.as_object_mut().unwrap().insert("parent".into(), parent_dep.depends_on_id.clone().into());
+            if let Some(parent_dep) = issue
+                .dependencies
+                .iter()
+                .find(|d| d.dep_type == DependencyType::ParentChild)
+            {
+                obj_mut(&mut val).insert("parent".into(), parent_dep.depends_on_id.clone().into());
             }
             output.push(val);
         }
@@ -571,12 +600,7 @@ pub fn dep_block(id: &str, by: &str, json: bool) -> Result<()> {
         println!("{}", serde_json::to_string(&issue)?);
     } else {
         if !added.is_empty() {
-            println!(
-                "{} {} now blocked by {}",
-                "✓".green(),
-                id,
-                added.join(", ")
-            );
+            println!("{} {} now blocked by {}", "✓".green(), id, added.join(", "));
         }
         if !skipped.is_empty() {
             println!(
@@ -627,7 +651,7 @@ pub fn dep_tree(id: &str, json: bool) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("Issue not found: {}", id))?;
 
     if json {
-        let tree = build_dep_tree_json(&store, issue, 0, &mut Vec::new());
+        let tree = build_dep_tree_json(&store, issue, &mut Vec::new());
         println!("{}", serde_json::to_string_pretty(&tree)?);
     } else {
         println!("{} {}", issue.id.cyan().bold(), issue.title.bold());
@@ -637,11 +661,9 @@ pub fn dep_tree(id: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-#[allow(clippy::only_used_in_recursion)]
 fn build_dep_tree_json(
     store: &UnifiedStore,
     issue: &Issue,
-    depth: usize,
     visited: &mut Vec<String>,
 ) -> serde_json::Value {
     if visited.contains(&issue.id) {
@@ -658,10 +680,8 @@ fn build_dep_tree_json(
         .iter()
         .filter_map(|dep| {
             store.get(&dep.depends_on_id).map(|child| {
-                let mut node = build_dep_tree_json(store, child, depth + 1, visited);
-                node.as_object_mut()
-                    .unwrap()
-                    .insert("dep_type".into(), dep.dep_type.to_string().into());
+                let mut node = build_dep_tree_json(store, child, visited);
+                obj_mut(&mut node).insert("dep_type".into(), dep.dep_type.to_string().into());
                 node
             })
         })
@@ -694,14 +714,10 @@ fn build_dep_tree_json(
     });
 
     if !children.is_empty() {
-        node.as_object_mut()
-            .unwrap()
-            .insert("depends_on".into(), children.into());
+        obj_mut(&mut node).insert("depends_on".into(), children.into());
     }
     if !dependents.is_empty() {
-        node.as_object_mut()
-            .unwrap()
-            .insert("depended_on_by".into(), dependents.into());
+        obj_mut(&mut node).insert("depended_on_by".into(), dependents.into());
     }
 
     node
@@ -723,7 +739,11 @@ fn print_dep_tree(
     let deps: Vec<_> = issue.dependencies.iter().collect();
     for (i, dep) in deps.iter().enumerate() {
         let is_last_dep = i == deps.len() - 1;
-        let connector = if is_last_dep { "└── " } else { "├── " };
+        let connector = if is_last_dep {
+            "└── "
+        } else {
+            "├── "
+        };
         let child_prefix = if is_last_dep { "    " } else { "│   " };
 
         let type_label = match dep.dep_type {
@@ -796,11 +816,7 @@ pub fn create_many(json_input: &str, dry_run: bool, json: bool) -> Result<()> {
                 }))?
             );
         } else {
-            println!(
-                "{} Would create {} issue(s):",
-                "⊘".yellow(),
-                items.len()
-            );
+            println!("{} Would create {} issue(s):", "⊘".yellow(), items.len());
             for (i, item) in items.iter().enumerate() {
                 let title = item["title"].as_str().unwrap_or("(no title)");
                 let itype = item["issue_type"].as_str().unwrap_or("task");
@@ -862,16 +878,12 @@ pub fn create_many(json_input: &str, dry_run: bool, json: bool) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(&results)?);
     } else {
-        println!(
-            "{} Created {} issue(s):",
-            "✓".green(),
-            results.len()
-        );
+        println!("{} Created {} issue(s):", "✓".green(), results.len());
         for r in &results {
             println!(
                 "  {} {}",
-                r["id"].as_str().unwrap().cyan(),
-                r["title"].as_str().unwrap()
+                r["id"].as_str().unwrap_or_default().cyan(),
+                r["title"].as_str().unwrap_or_default()
             );
         }
     }
@@ -908,11 +920,14 @@ pub fn plan_import(
 
     if dry_run {
         if json {
-            println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-                "dry_run": true,
-                "epic": epic_item,
-                "children": children,
-            }))?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "dry_run": true,
+                    "epic": epic_item,
+                    "children": children,
+                }))?
+            );
         } else {
             println!("{} Would create:", "⊘".yellow());
             println!(
@@ -963,10 +978,7 @@ pub fn plan_import(
 
         let mut child = Issue::new(
             child_id.clone(),
-            child_item["title"]
-                .as_str()
-                .unwrap_or("Task")
-                .to_string(),
+            child_item["title"].as_str().unwrap_or("Task").to_string(),
         );
         child.issue_type = child_item["issue_type"]
             .as_str()
@@ -1009,7 +1021,7 @@ pub fn plan_import(
             created_ids.len() - 1
         );
         for id in &created_ids {
-            let issue = store.get(id).unwrap();
+            let Some(issue) = store.get(id) else { continue };
             println!(
                 "  {} [P{}] [{}] {}",
                 issue.id.cyan(),
@@ -1160,9 +1172,7 @@ fn parse_plan_markdown(content: &str, epic_title: Option<&str>) -> Result<Vec<se
         "priority": 2,
     });
     if !epic_desc.is_empty() {
-        epic.as_object_mut()
-            .unwrap()
-            .insert("description".into(), epic_desc.into());
+        obj_mut(&mut epic).insert("description".into(), epic_desc.into());
     }
     items.push(epic);
 
@@ -1185,10 +1195,7 @@ fn parse_plan_markdown(content: &str, epic_title: Option<&str>) -> Result<Vec<se
             });
             let desc_text = desc.join("\n").trim().to_string();
             if !desc_text.is_empty() {
-                child
-                    .as_object_mut()
-                    .unwrap()
-                    .insert("description".into(), desc_text.into());
+                obj_mut(&mut child).insert("description".into(), desc_text.into());
             }
             items.push(child);
         }
@@ -1403,7 +1410,9 @@ pub fn migrate(dry_run: bool, rollback: bool, yes: bool) -> Result<()> {
         );
         println!();
         println!("Note: The crdt/ directory was preserved. You can remove it manually:");
-        println!("  rm -rf {}/.trx/crdt", trx_dir.parent().unwrap().display());
+        if let Some(parent) = trx_dir.parent() {
+            println!("  rm -rf {}/.trx/crdt", parent.display());
+        }
     } else {
         // Migrate v1 -> v2
         if current_version == StorageVersion::V2 {
@@ -1992,12 +2001,8 @@ pub fn merge_driver_install() -> Result<()> {
     println!("  Merge driver: {}", driver_cmd);
     println!("  .gitattributes: {}", attr_line);
     println!();
-    println!(
-        "ISSUES.md conflicts will now be auto-resolved during git merge/rebase."
-    );
-    println!(
-        "Remember to commit .gitattributes so the driver applies for all contributors."
-    );
+    println!("ISSUES.md conflicts will now be auto-resolved during git merge/rebase.");
+    println!("Remember to commit .gitattributes so the driver applies for all contributors.");
 
     Ok(())
 }
@@ -2016,10 +2021,7 @@ pub fn merge_driver_uninstall() -> Result<()> {
 
     if gitattributes_path.exists() {
         let content = std::fs::read_to_string(&gitattributes_path)?;
-        let filtered: Vec<&str> = content
-            .lines()
-            .filter(|l| l.trim() != attr_line)
-            .collect();
+        let filtered: Vec<&str> = content.lines().filter(|l| l.trim() != attr_line).collect();
 
         if filtered.is_empty() {
             std::fs::remove_file(&gitattributes_path)?;
@@ -2187,7 +2189,7 @@ pub fn service<T: ServiceCommand>(cmd: T) -> Result<()> {
         {
             let exe_dir = std::env::current_exe()?
                 .parent()
-                .unwrap()
+                .unwrap_or(std::path::Path::new("."))
                 .display()
                 .to_string();
 
@@ -2215,7 +2217,7 @@ pub fn service<T: ServiceCommand>(cmd: T) -> Result<()> {
         {
             let exe_dir = std::env::current_exe()?
                 .parent()
-                .unwrap()
+                .unwrap_or(std::path::Path::new("."))
                 .display()
                 .to_string();
 
@@ -2248,7 +2250,7 @@ pub fn service<T: ServiceCommand>(cmd: T) -> Result<()> {
         {
             let exe_dir = std::env::current_exe()?
                 .parent()
-                .unwrap()
+                .unwrap_or(std::path::Path::new("."))
                 .display()
                 .to_string();
 

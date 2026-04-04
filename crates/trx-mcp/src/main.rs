@@ -160,17 +160,17 @@ impl TrxMcpRouter {
             .collect();
 
         // Filter by status
-        if let Some(status_str) = &args.status {
-            if let Ok(status) = status_str.parse::<Status>() {
-                issues.retain(|i| i.status == status);
-            }
+        if let Some(status_str) = &args.status
+            && let Ok(status) = status_str.parse::<Status>()
+        {
+            issues.retain(|i| i.status == status);
         }
 
         // Filter by type
-        if let Some(type_str) = &args.issue_type {
-            if let Ok(issue_type) = type_str.parse::<IssueType>() {
-                issues.retain(|i| i.issue_type == issue_type);
-            }
+        if let Some(type_str) = &args.issue_type
+            && let Ok(issue_type) = type_str.parse::<IssueType>()
+        {
+            issues.retain(|i| i.issue_type == issue_type);
         }
 
         // Filter by priority
@@ -206,7 +206,7 @@ impl TrxMcpRouter {
         let ready: Vec<_> = all_open
             .iter()
             .filter(|issue| !issue.is_blocked_by(&all_open))
-            .cloned()
+            .copied()
             .cloned()
             .collect();
 
@@ -269,10 +269,10 @@ impl TrxMcpRouter {
         if let Some(priority) = args.priority {
             issue.priority = priority.min(4);
         }
-        if let Some(type_str) = args.issue_type {
-            if let Ok(t) = type_str.parse::<IssueType>() {
-                issue.issue_type = t;
-            }
+        if let Some(type_str) = args.issue_type
+            && let Ok(t) = type_str.parse::<IssueType>()
+        {
+            issue.issue_type = t;
         }
         if let Some(labels) = args.labels {
             issue.labels = labels;
@@ -318,18 +318,18 @@ impl TrxMcpRouter {
         if let Some(desc) = args.description {
             issue.description = Some(desc);
         }
-        if let Some(status_str) = args.status {
-            if let Ok(status) = status_str.parse::<Status>() {
-                issue.status = status;
-            }
+        if let Some(status_str) = args.status
+            && let Ok(status) = status_str.parse::<Status>()
+        {
+            issue.status = status;
         }
         if let Some(priority) = args.priority {
             issue.priority = priority.min(4);
         }
-        if let Some(type_str) = args.issue_type {
-            if let Ok(t) = type_str.parse::<IssueType>() {
-                issue.issue_type = t;
-            }
+        if let Some(type_str) = args.issue_type
+            && let Ok(t) = type_str.parse::<IssueType>()
+        {
+            issue.issue_type = t;
         }
         if let Some(labels) = args.labels {
             issue.labels = labels;

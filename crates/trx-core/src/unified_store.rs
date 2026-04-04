@@ -173,7 +173,7 @@ pub fn migrate_v1_to_v2(dry_run: bool) -> Result<MigrationResult> {
 
     // Create a temporary CRDT store to convert issues
     let mut crdt_store = CrdtStore {
-        root: trx_dir.parent().unwrap().to_path_buf(),
+        root: trx_dir.parent().unwrap_or(&trx_dir).to_path_buf(),
         issues: std::collections::HashMap::new(),
     };
 

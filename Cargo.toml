@@ -39,3 +39,37 @@ tabled = "0.17"
 
 # Graph analysis (for viewer)
 petgraph = "0.7"
+
+# Workspace-wide clippy linting configuration
+# These rules are enforced across all crates to maintain code quality
+[workspace.lints.rust]
+dead_code = "allow"
+unused_imports = "allow"
+
+[workspace.lints.clippy]
+# Style and correctness
+collapsible_if = "warn"
+collapsible_else_if = "warn"
+needless_return = "warn"
+needless_borrow = "warn"
+clone_on_copy = "warn"
+single_char_add_str = "warn"
+manual_strip = "warn"
+manual_flatten = "warn"
+unnecessary_lazy_evaluations = "warn"
+unnecessary_map_or = "warn"
+io_other_error = "warn"
+single_match = "warn"
+
+# Performance
+cloned_instead_of_copied = "warn"
+inefficient_to_string = "warn"
+
+# Pedantic (stricter)
+ptr_arg = "warn"
+derivable_impls = "warn"
+
+# These are intentionally allowed
+too_many_arguments = "allow"
+type_complexity = "allow"
+module_inception = "allow"

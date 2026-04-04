@@ -68,7 +68,7 @@ fn run_robot_mode(mode: RobotMode) -> Result<()> {
     match mode {
         RobotMode::Triage => {
             let mut sorted: Vec<_> = issues.into_iter().collect();
-            sorted.sort_by(|a, b| a.priority.cmp(&b.priority));
+            sorted.sort_by_key(|a| a.priority);
             println!("{}", serde_json::to_string_pretty(&sorted)?);
         }
         RobotMode::Next => {
@@ -800,12 +800,10 @@ impl App {
                 }
                 _ => {}
             },
-            KeyAction::Char('c') => {
-                if ctx == WhichKeyContext::Status {
-                    self.filter_state.show_closed = !self.filter_state.show_closed;
-                    self.apply_filters()?;
-                    self.mode = AppMode::Normal;
-                }
+            KeyAction::Char('c') if ctx == WhichKeyContext::Status => {
+                self.filter_state.show_closed = !self.filter_state.show_closed;
+                self.apply_filters()?;
+                self.mode = AppMode::Normal;
             }
             KeyAction::Char('r') => {
                 self.apply_filters()?;
@@ -842,14 +840,13 @@ impl App {
     }
 
     fn sort_by_priority(&mut self) {
-        self.filtered_issues
-            .sort_by(|a, b| a.priority.cmp(&b.priority));
+        self.filtered_issues.sort_by_key(|a| a.priority);
         self.show_status("Sorted by priority".to_string());
     }
 
     fn sort_by_date(&mut self) {
         self.filtered_issues
-            .sort_by(|a, b| b.created_at.cmp(&a.created_at));
+            .sort_by_key(|i| std::cmp::Reverse(i.created_at));
         self.show_status("Sorted by date".to_string());
     }
 

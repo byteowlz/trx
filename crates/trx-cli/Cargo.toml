@@ -17,3 +17,6 @@ chrono.workspace = true
 anyhow.workspace = true
 colored.workspace = true
 tabled.workspace = true
+
+[lints]
+workspace = true

@@ -45,9 +45,11 @@ impl CrdtStore {
         fs::create_dir_all(&crdt_dir)?;
 
         // Create config with v2 storage
-        let mut config = Config::default();
-        config.storage_version = StorageVersion::V2;
-        config.prefix = prefix.to_string();
+        let config = Config {
+            storage_version: StorageVersion::V2,
+            prefix: prefix.to_string(),
+            ..Config::default()
+        };
         config.save(&trx_dir.join(CONFIG_FILE))?;
 
         // Create empty ISSUES.md
@@ -199,10 +201,10 @@ impl CrdtStore {
         if let Ok(Some((_, labels_id))) = doc.get(automerge::ROOT, "labels") {
             let len = doc.length(&labels_id);
             for i in 0..len {
-                if let Ok(Some((v, _))) = doc.get(&labels_id, i) {
-                    if let Some(s) = v.to_str() {
-                        issue.labels.push(s.to_string());
-                    }
+                if let Ok(Some((v, _))) = doc.get(&labels_id, i)
+                    && let Some(s) = v.to_str()
+                {
+                    issue.labels.push(s.to_string());
                 }
             }
         }
@@ -384,7 +386,7 @@ impl CrdtStore {
                 .cmp(&b.priority)
                 .then_with(|| b.created_at.cmp(&a.created_at))
         });
-        closed.sort_by(|a, b| b.closed_at.cmp(&a.closed_at));
+        closed.sort_by_key(|i| std::cmp::Reverse(i.closed_at));
 
         // Open issues
         if !open.is_empty() {
