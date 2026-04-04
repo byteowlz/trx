@@ -42,13 +42,17 @@ enum Commands {
         #[arg(short, long, default_value = "2")]
         priority: u8,
 
-        /// Description
+        /// Description (use '-' to read from stdin)
         #[arg(short, long)]
         description: Option<String>,
 
         /// Parent issue ID (for child issues)
         #[arg(long)]
         parent: Option<String>,
+
+        /// Custom ID prefix (e.g., 'mmry' generates mmry-xxxx)
+        #[arg(long)]
+        id: Option<String>,
 
         /// Open $EDITOR for description
         #[arg(long)]
@@ -84,6 +88,22 @@ enum Commands {
         /// Limit number of issues shown
         #[arg(short = 'l', long)]
         limit: Option<usize>,
+
+        /// Filter by label (multiple --label flags for AND filtering)
+        #[arg(long)]
+        label: Vec<String>,
+
+        /// Filter by assignee (use 'me' for current user)
+        #[arg(long)]
+        assignee: Option<String>,
+
+        /// Show issues created after this date (ISO or relative: '1 week', '2 days')
+        #[arg(long)]
+        created_after: Option<String>,
+
+        /// Show issues created before this date (ISO or relative: '1 week', '2 days')
+        #[arg(long)]
+        created_before: Option<String>,
     },
 
     /// Show issue details
@@ -109,13 +129,17 @@ enum Commands {
         #[arg(long)]
         title: Option<String>,
 
-        /// New description
+        /// New description (use '-' to read from stdin)
         #[arg(short, long)]
         description: Option<String>,
 
         /// Open $EDITOR for description
         #[arg(long)]
         edit: bool,
+
+        /// Clear a field (description, parent, labels, assignee, notes, sessions)
+        #[arg(long)]
+        clear: Vec<String>,
     },
 
     /// Close an issue
@@ -159,6 +183,27 @@ enum Commands {
         /// Commit message
         #[arg(short, long)]
         message: Option<String>,
+
+        /// Preview changes without committing
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Stage changes without committing
+        #[arg(long)]
+        no_commit: bool,
+    },
+
+    /// Generate compact handover summary for agent handoff
+    Handover,
+
+    /// Search issues across all repos
+    Search {
+        /// Search query
+        query: String,
+
+        /// Search all sibling repos with .trx/
+        #[arg(long)]
+        all_repos: bool,
     },
 
     /// Migrate storage format
@@ -361,6 +406,7 @@ fn main() -> Result<()> {
             priority,
             description,
             parent,
+            id,
             edit,
         } => commands::create(
             &title,
@@ -368,6 +414,7 @@ fn main() -> Result<()> {
             priority,
             description,
             parent,
+            id,
             edit,
             cli.json,
         ),
@@ -379,8 +426,23 @@ fn main() -> Result<()> {
             epic,
             all,
             limit,
+            label,
+            assignee,
+            created_after,
+            created_before,
         } => commands::list(
-            status, issue_type, priority, search, epic, all, limit, cli.json,
+            status,
+            issue_type,
+            priority,
+            search,
+            epic,
+            all,
+            limit,
+            label,
+            assignee,
+            created_after,
+            created_before,
+            cli.json,
         ),
         Commands::Show { id } => commands::show(&id, cli.json),
         Commands::Update {
@@ -390,7 +452,17 @@ fn main() -> Result<()> {
             title,
             description,
             edit,
-        } => commands::update(&id, status, priority, title, description, edit, cli.json),
+            clear,
+        } => commands::update(
+            &id,
+            status,
+            priority,
+            title,
+            description,
+            edit,
+            clear,
+            cli.json,
+        ),
         Commands::Close { id, reason } => commands::close(&id, reason, cli.json),
         Commands::Ready => commands::ready(cli.json),
         Commands::Dep { command } => match command {
@@ -413,7 +485,13 @@ fn main() -> Result<()> {
             } => commands::plan_import(&path, epic, priority, dry_run, cli.json),
             PlanCommands::Example { format } => commands::plan_example(&format),
         },
-        Commands::Sync { message } => commands::sync(message),
+        Commands::Sync {
+            message,
+            dry_run,
+            no_commit,
+        } => commands::sync(message, dry_run, no_commit),
+        Commands::Handover => commands::handover(cli.json),
+        Commands::Search { query, all_repos } => commands::search(&query, all_repos, cli.json),
         Commands::Migrate {
             dry_run,
             rollback,

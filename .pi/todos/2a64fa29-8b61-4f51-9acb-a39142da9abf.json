@@ -15,7 +15,7 @@
     {
       "id": "0c",
       "content": "Add chat session IDs field to Issue model",
-      "status": "in_progress",
+      "status": "completed",
       "priority": "high"
     },
     {
@@ -25,65 +25,11 @@
       "priority": "high"
     },
     {
-      "id": "1",
-      "content": "trx-pa3y: Custom ID prefix on create",
-      "status": "pending",
+      "id": "features",
+      "content": "Implement all 10 open feature tasks",
+      "status": "in_progress",
       "priority": "medium"
-    },
-    {
-      "id": "2",
-      "content": "trx-jn7s: Date range filters (--created-after/--created-before)",
-      "status": "pending",
-      "priority": "medium"
-    },
-    {
-      "id": "3",
-      "content": "trx-kx6q: --label filter to list",
-      "status": "pending",
-      "priority": "medium"
-    },
-    {
-      "id": "4",
-      "content": "trx-msj1: Cross-repo issue search",
-      "status": "pending",
-      "priority": "medium"
-    },
-    {
-      "id": "5",
-      "content": "trx-yw64: Standardize list/search JSON output",
-      "status": "pending",
-      "priority": "medium"
-    },
-    {
-      "id": "6",
-      "content": "trx-cgs7: --description from stdin",
-      "status": "pending",
-      "priority": "low"
-    },
-    {
-      "id": "7",
-      "content": "trx-gt71: --clear for update fields",
-      "status": "pending",
-      "priority": "low"
-    },
-    {
-      "id": "8",
-      "content": "trx-te7r: trx handover command",
-      "status": "pending",
-      "priority": "low"
-    },
-    {
-      "id": "9",
-      "content": "trx-wfxe: --assignee filter to list",
-      "status": "pending",
-      "priority": "low"
-    },
-    {
-      "id": "10",
-      "content": "trx-bqnp: trx sync --message and --dry-run",
-      "status": "pending",
-      "priority": "low"
     }
   ],
-  "updated_at": "2026-04-04T09:29:19.051Z"
+  "updated_at": "2026-04-04T09:30:48.767Z"
 }

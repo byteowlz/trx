@@ -25,17 +25,35 @@ pub fn init(prefix: &str) -> Result<()> {
     Ok(())
 }
 
+/// Read description from stdin when value is "-"
+fn read_description(description: Option<String>) -> Result<Option<String>> {
+    match description.as_deref() {
+        Some("-") => {
+            let mut buf = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+            let trimmed = buf.trim().to_string();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed))
+            }
+        }
+        _ => Ok(description),
+    }
+}
+
 pub fn create(
     title: &str,
     issue_type: &str,
     priority: u8,
     description: Option<String>,
     parent: Option<String>,
+    custom_prefix: Option<String>,
     edit: bool,
     json: bool,
 ) -> Result<()> {
     let mut store = UnifiedStore::open()?;
-    let prefix = store.prefix()?;
+    let prefix = custom_prefix.unwrap_or(store.prefix()?);
 
     let id = if let Some(ref parent_id) = parent {
         let child_num = store.next_child_num(parent_id);
@@ -51,7 +69,7 @@ pub fn create(
         let template = description.unwrap_or_default();
         Some(open_editor_for_description(&template, title)?)
     } else {
-        description
+        read_description(description)?
     };
 
     if let Some(ref parent_id) = parent {
@@ -71,6 +89,64 @@ pub fn create(
     Ok(())
 }
 
+/// Parse a date string that can be ISO 8601 or relative (e.g., "1 week", "2 days", "3 hours")
+fn parse_date(s: &str) -> Result<chrono::DateTime<chrono::Utc>> {
+    // Try ISO 8601 first
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+        return Ok(dt.into());
+    }
+    // Try date-only ISO
+    if let Ok(date) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        let dt = date
+            .and_hms_opt(0, 0, 0)
+            .ok_or_else(|| anyhow::anyhow!("Invalid date: {}", s))?;
+        return Ok(chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
+            dt,
+            chrono::Utc,
+        ));
+    }
+    // Try relative: "N unit" where unit is day(s), week(s), hour(s), month(s)
+    let parts: Vec<&str> = s.split_whitespace().collect();
+    if parts.len() == 2
+        && let Ok(n) = parts[0].parse::<i64>()
+    {
+        let unit = parts[1].to_lowercase();
+        let duration = match unit.trim_end_matches('s') {
+            "hour" => chrono::Duration::hours(n),
+            "day" => chrono::Duration::days(n),
+            "week" => chrono::Duration::weeks(n),
+            "month" => chrono::Duration::days(n * 30),
+            _ => bail!(
+                "Unknown time unit: {}. Use hour(s), day(s), week(s), month(s)",
+                unit
+            ),
+        };
+        return Ok(chrono::Utc::now() - duration);
+    }
+    bail!(
+        "Cannot parse date: '{}'. Use ISO format (2024-01-15) or relative (1 week, 2 days)",
+        s
+    )
+}
+
+/// Resolve 'me' assignee to current git user
+fn resolve_assignee(assignee: &str) -> String {
+    if assignee.eq_ignore_ascii_case("me") {
+        // Try git config first, then env
+        std::process::Command::new("git")
+            .args(["config", "user.name"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| std::env::var("USER").ok())
+            .unwrap_or_else(|| "me".to_string())
+    } else {
+        assignee.to_string()
+    }
+}
+
 pub fn list(
     status: Option<String>,
     issue_type: Option<String>,
@@ -79,6 +155,10 @@ pub fn list(
     epic: Option<String>,
     all: bool,
     limit: Option<usize>,
+    labels: Vec<String>,
+    assignee: Option<String>,
+    created_after: Option<String>,
+    created_before: Option<String>,
     json: bool,
 ) -> Result<()> {
     let store = UnifiedStore::open()?;
@@ -148,6 +228,38 @@ pub fn list(
                     .is_some_and(|d| d.to_lowercase().contains(&q_lower))
                 || i.id.to_lowercase().contains(&q_lower)
         });
+    }
+
+    // Filter by label (AND: issue must have ALL specified labels)
+    if !labels.is_empty() {
+        issues.retain(|i| {
+            labels
+                .iter()
+                .all(|l| i.labels.iter().any(|il| il.eq_ignore_ascii_case(l)))
+        });
+    }
+
+    // Filter by assignee
+    if let Some(ref a) = assignee {
+        let resolved = resolve_assignee(a);
+        let resolved_lower = resolved.to_lowercase();
+        issues.retain(|i| {
+            i.assignee
+                .as_ref()
+                .is_some_and(|ia| ia.to_lowercase().contains(&resolved_lower))
+        });
+    }
+
+    // Filter by created_after
+    if let Some(ref after) = created_after {
+        let after_dt = parse_date(after)?;
+        issues.retain(|i| i.created_at >= after_dt);
+    }
+
+    // Filter by created_before
+    if let Some(ref before) = created_before {
+        let before_dt = parse_date(before)?;
+        issues.retain(|i| i.created_at <= before_dt);
     }
 
     // Sort by priority, then by creation date
@@ -387,6 +499,7 @@ pub fn update(
     title: Option<String>,
     description: Option<String>,
     edit: bool,
+    clear: Vec<String>,
     json: bool,
 ) -> Result<()> {
     let mut store = UnifiedStore::open()?;
@@ -407,7 +520,25 @@ pub fn update(
         let current = issue.description.clone().unwrap_or_default();
         issue.description = Some(open_editor_for_description(&current, &issue.title)?);
     } else if let Some(d) = description {
-        issue.description = Some(d);
+        issue.description = read_description(Some(d))?;
+    }
+
+    // Handle --clear flags
+    for field in &clear {
+        match field.to_lowercase().as_str() {
+            "description" | "desc" => issue.description = None,
+            "parent" => issue
+                .dependencies
+                .retain(|d| d.dep_type != DependencyType::ParentChild),
+            "labels" => issue.labels.clear(),
+            "assignee" => issue.assignee = None,
+            "notes" => issue.notes = None,
+            "sessions" => issue.sessions.clear(),
+            other => bail!(
+                "Unknown field to clear: '{}'. Use: description, parent, labels, assignee, notes, sessions",
+                other
+            ),
+        }
     }
 
     issue.updated_at = chrono::Utc::now();
@@ -1313,7 +1444,7 @@ fn open_editor_for_description(current: &str, title: &str) -> Result<String> {
     Ok(cleaned)
 }
 
-pub fn sync(message: Option<String>) -> Result<()> {
+pub fn sync(message: Option<String>, dry_run: bool, no_commit: bool) -> Result<()> {
     let mut store = UnifiedStore::open()?;
     let trx_dir = store.trx_dir();
 
@@ -1324,6 +1455,23 @@ pub fn sync(message: Option<String>) -> Result<()> {
         for file in &resolved {
             println!("  - {}", file);
         }
+    }
+
+    if dry_run {
+        // Show what would be staged
+        let output = std::process::Command::new("git")
+            .args(["status", "--porcelain", "--", &trx_dir.to_string_lossy()])
+            .output()?;
+        let changes = String::from_utf8_lossy(&output.stdout);
+        if changes.trim().is_empty() {
+            println!("Nothing to sync");
+        } else {
+            println!("{} Would sync these changes:", "⊘".yellow());
+            for line in changes.lines() {
+                println!("  {}", line);
+            }
+        }
+        return Ok(());
     }
 
     let msg = message.unwrap_or_else(|| "trx: sync issues".to_string());
@@ -1338,6 +1486,11 @@ pub fn sync(message: Option<String>) -> Result<()> {
             "git add failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    if no_commit {
+        println!("{} Staged .trx/ (not committed)", "✓".green());
+        return Ok(());
     }
 
     // Git commit
@@ -1356,6 +1509,189 @@ pub fn sync(message: Option<String>) -> Result<()> {
 
     println!("{} Synced .trx/", "✓".green());
     Ok(())
+}
+
+// ============================================================================
+// Handover (trx-te7r)
+// ============================================================================
+
+pub fn handover(json: bool) -> Result<()> {
+    let store = UnifiedStore::open()?;
+    let all_issues: Vec<_> = store.list(false);
+    let open_issues: Vec<_> = all_issues
+        .iter()
+        .filter(|i| i.status.is_open())
+        .copied()
+        .collect();
+    let graph = IssueGraph::from_issues(&open_issues);
+    let ready = graph.ready_issues(&open_issues);
+    let ready_ids: std::collections::HashSet<_> = ready.iter().map(|i| i.id.as_str()).collect();
+
+    if json {
+        let mut output = Vec::new();
+        // Topological: ready first, then blocked
+        let mut sorted_open: Vec<_> = open_issues.iter().collect();
+        sorted_open.sort_by(|a, b| {
+            let a_ready = ready_ids.contains(a.id.as_str());
+            let b_ready = ready_ids.contains(b.id.as_str());
+            b_ready
+                .cmp(&a_ready)
+                .then_with(|| a.priority.cmp(&b.priority))
+        });
+        for issue in sorted_open {
+            let blocked_by: Vec<&str> = issue
+                .dependencies
+                .iter()
+                .filter(|d| d.dep_type == DependencyType::Blocks)
+                .filter(|d| open_issues.iter().any(|i| i.id == d.depends_on_id))
+                .map(|d| d.depends_on_id.as_str())
+                .collect();
+            output.push(serde_json::json!({
+                "id": issue.id,
+                "title": issue.title,
+                "priority": issue.priority,
+                "type": issue.issue_type.to_string(),
+                "status": issue.status.to_string(),
+                "ready": ready_ids.contains(issue.id.as_str()),
+                "blocked_by": blocked_by,
+            }));
+        }
+        println!("{}", serde_json::to_string(&output)?);
+    } else {
+        // Compact one-line-per-issue summary
+        let mut sorted_open: Vec<_> = open_issues.iter().collect();
+        sorted_open.sort_by(|a, b| {
+            let a_ready = ready_ids.contains(a.id.as_str());
+            let b_ready = ready_ids.contains(b.id.as_str());
+            b_ready
+                .cmp(&a_ready)
+                .then_with(|| a.priority.cmp(&b.priority))
+        });
+        for issue in sorted_open {
+            let marker = if ready_ids.contains(issue.id.as_str()) {
+                "▶"
+            } else {
+                "◼"
+            };
+            let blocked_by: Vec<String> = issue
+                .dependencies
+                .iter()
+                .filter(|d| d.dep_type == DependencyType::Blocks)
+                .filter(|d| open_issues.iter().any(|i| i.id == d.depends_on_id))
+                .map(|d| d.depends_on_id.clone())
+                .collect();
+            let suffix = if blocked_by.is_empty() {
+                String::new()
+            } else {
+                format!(" ← {}", blocked_by.join(","))
+            };
+            println!(
+                "{} {} P{} [{}] {}{}",
+                marker, issue.id, issue.priority, issue.issue_type, issue.title, suffix
+            );
+        }
+    }
+    Ok(())
+}
+
+// ============================================================================
+// Search (trx-msj1)
+// ============================================================================
+
+pub fn search(query: &str, all_repos: bool, json: bool) -> Result<()> {
+    let q_lower = query.to_lowercase();
+
+    let mut results: Vec<(String, Issue)> = Vec::new(); // (repo_name, issue)
+
+    if all_repos {
+        // Find sibling repos with .trx/
+        let current = std::env::current_dir()?;
+        if let Some(parent) = current.parent() {
+            for entry in std::fs::read_dir(parent)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.is_dir() && path.join(".trx").exists() {
+                    let repo_name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    // Try to open the store from that directory
+                    let prev_dir = std::env::current_dir()?;
+                    if std::env::set_current_dir(&path).is_ok() {
+                        if let Ok(store) = UnifiedStore::open() {
+                            for issue in store.list(false) {
+                                if matches_search(issue, &q_lower) {
+                                    results.push((repo_name.clone(), issue.clone()));
+                                }
+                            }
+                        }
+                        let _ = std::env::set_current_dir(&prev_dir);
+                    }
+                }
+            }
+        }
+    } else {
+        let store = UnifiedStore::open()?;
+        let repo_name = std::env::current_dir()?
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        for issue in store.list(false) {
+            if matches_search(issue, &q_lower) {
+                results.push((repo_name.clone(), issue.clone()));
+            }
+        }
+    }
+
+    if json {
+        let output: Vec<serde_json::Value> = results
+            .iter()
+            .map(|(repo, issue)| {
+                serde_json::json!({
+                    "source": "trx",
+                    "source_repo": repo,
+                    "id": issue.id,
+                    "title": issue.title,
+                    "content": issue.description,
+                    "status": issue.status.to_string(),
+                    "priority": issue.priority,
+                    "labels": issue.labels,
+                    "created_at": issue.created_at.to_rfc3339(),
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string(&output)?);
+    } else if results.is_empty() {
+        println!("No issues found matching '{}'", query);
+    } else {
+        for (repo, issue) in &results {
+            println!(
+                "[{}] {} [P{}] [{}] {} - {}",
+                repo.cyan(),
+                issue.id.cyan(),
+                issue.priority,
+                issue.issue_type.to_string().blue(),
+                issue.status,
+                issue.title
+            );
+        }
+        println!("\n{} result(s)", results.len());
+    }
+
+    Ok(())
+}
+
+fn matches_search(issue: &Issue, q_lower: &str) -> bool {
+    issue.title.to_lowercase().contains(q_lower)
+        || issue
+            .description
+            .as_ref()
+            .is_some_and(|d| d.to_lowercase().contains(q_lower))
+        || issue.id.to_lowercase().contains(q_lower)
+        || issue
+            .labels
+            .iter()
+            .any(|l| l.to_lowercase().contains(q_lower))
 }
 
 pub fn migrate(dry_run: bool, rollback: bool, yes: bool) -> Result<()> {

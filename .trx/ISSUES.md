@@ -1,36 +1,18 @@
 # Issues
 
-## Open
-
-### [trx-msj1] Add cross-repo issue search (P2, feature)
-Each .trx/ store is isolated per repo. Cannot search issues across all repos. Add a --all-repos flag (or trx search --global) that discovers .trx/ directories in sibling repos and merges results. Needed for cross-project queries like 'all open authentication bugs across all repos'.
-
-### [trx-yw64] Standardize list/search JSON output for cross-tool integration (P2, feature)
-For unified search across hstry/mmry/trx, results need a common envelope format: { source: 'trx', source_repo, id, title, content (description), status, priority, labels, created_at, metadata }. Ensure trx list --json output matches this schema so agntz can merge results from all three tools.
-
-### [trx-kx6q] Add --label filter to list (P2, feature)
-Issues have labels but list cannot filter by them. Add --label flag that filters issues containing the specified label. Support multiple --label flags for AND filtering. Labels are the cross-tool connector for unified search across hstry/mmry/trx.
-
-### [trx-jn7s] Add date range filters (--created-after/--created-before) to list (P2, feature)
-Issues have created_at/updated_at timestamps but list has no date range filter. Cannot say 'issues created this week'. Add --created-after and --created-before flags that filter on created_at. Accept relative formats ('1 week', '2 days') and ISO dates.
-
-### [trx-pa3y] Custom ID prefix on create - 'trx create --id mmry-lrn' to control the generated issue ID prefix instead of random (P2, feature)
-
-### [trx-wfxe] Add --assignee filter to list (P3, feature)
-Issues have an assignee field but list cannot filter by it. Add --assignee flag. Support --assignee me for current user (from git config or AGENT_HARNESS env).
-
-### [trx-cgs7] trx update should accept --description from stdin when value is '-', for adding long descriptions to existing issues (P3, feature)
-
-### [trx-te7r] trx handover - generate compact one-line summary of all issues with dependency order for agent handoff (P3, feature)
-
-### [trx-bqnp] Add trx sync options for message and dry-run (P3, feature)
-Support --message to set commit message and --dry-run or --no-commit to inspect staged changes without committing.
-
-### [trx-gt71] Add --clear for update fields (P3, feature)
-Allow trx update to clear optional fields (description, parent, labels) explicitly, e.g., --clear description.
-
 ## Closed
 
+- [trx-bqnp] Add trx sync options for message and dry-run (closed 2026-04-04)
+- [trx-wfxe] Add --assignee filter to list (closed 2026-04-04)
+- [trx-te7r] trx handover - generate compact one-line summary of all issues with dependency order for agent handoff (closed 2026-04-04)
+- [trx-gt71] Add --clear for update fields (closed 2026-04-04)
+- [trx-cgs7] trx update should accept --description from stdin when value is '-', for adding long descriptions to existing issues (closed 2026-04-04)
+- [trx-yw64] Standardize list/search JSON output for cross-tool integration (closed 2026-04-04)
+- [trx-msj1] Add cross-repo issue search (closed 2026-04-04)
+- [trx-kx6q] Add --label filter to list (closed 2026-04-04)
+- [trx-jn7s] Add date range filters (--created-after/--created-before) to list (closed 2026-04-04)
+- [trx-pa3y] Custom ID prefix on create - 'trx create --id mmry-lrn' to control the generated issue ID prefix instead of random (closed 2026-04-04)
+- [myprefix-6wze] Test custom prefix (closed 2026-04-04)
 - [trx-f4ck] trx list --epic <id> to show all children/descendants of an epic (closed 2026-03-17)
 - [trx-tkmz] trx list --json should include resolved parent, blocked_by, blocks fields - currently these are null even when dependencies exist (closed 2026-03-17)
 - [trx-nst7] Add list filters (status/type/priority/search) (closed 2026-03-17)
