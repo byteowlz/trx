@@ -197,6 +197,18 @@ impl CrdtStore {
             issue.notes = Some(notes);
         }
 
+        // Load sessions
+        if let Ok(Some((_, sessions_id))) = doc.get(automerge::ROOT, "sessions") {
+            let len = doc.length(&sessions_id);
+            for i in 0..len {
+                if let Ok(Some((v, _))) = doc.get(&sessions_id, i)
+                    && let Some(s) = v.to_str()
+                {
+                    issue.sessions.push(s.to_string());
+                }
+            }
+        }
+
         // Load labels
         if let Ok(Some((_, labels_id))) = doc.get(automerge::ROOT, "labels") {
             let len = doc.length(&labels_id);
@@ -309,6 +321,17 @@ impl CrdtStore {
         if let Some(ref notes) = issue.notes {
             doc.put(automerge::ROOT, "notes", notes.as_str())
                 .map_err(|e| Error::Other(format!("Failed to set notes: {}", e)))?;
+        }
+
+        // Sessions
+        if !issue.sessions.is_empty() {
+            let sessions_id = doc
+                .put_object(automerge::ROOT, "sessions", ObjType::List)
+                .map_err(|e| Error::Other(format!("Failed to create sessions: {}", e)))?;
+            for (i, session) in issue.sessions.iter().enumerate() {
+                doc.insert(&sessions_id, i, session.as_str())
+                    .map_err(|e| Error::Other(format!("Failed to add session: {}", e)))?;
+            }
         }
 
         // Labels

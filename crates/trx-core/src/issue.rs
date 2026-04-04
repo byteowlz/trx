@@ -214,6 +214,10 @@ pub struct Issue {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
 
+    /// Chat session IDs linked to this issue (e.g., pi/oqto session UUIDs)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sessions: Vec<String>,
+
     // Beads compatibility fields
     /// Original type before tombstone (beads compat)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -249,6 +253,7 @@ impl Issue {
             close_reason: None,
             assignee: None,
             notes: None,
+            sessions: Vec::new(),
             original_type: None,
             deleted_by: None,
             delete_reason: None,

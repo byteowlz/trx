@@ -15,13 +15,13 @@
     {
       "id": "0c",
       "content": "Add chat session IDs field to Issue model",
-      "status": "pending",
+      "status": "in_progress",
       "priority": "high"
     },
     {
       "id": "0d",
       "content": "Fix all existing clippy/ast-grep violations",
-      "status": "in_progress",
+      "status": "completed",
       "priority": "high"
     },
     {
@@ -85,5 +85,5 @@
       "priority": "low"
     }
   ],
-  "updated_at": "2026-04-04T09:21:58.979Z"
+  "updated_at": "2026-04-04T09:29:19.051Z"
 }
