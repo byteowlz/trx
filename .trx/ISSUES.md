@@ -2,7 +2,22 @@
 
 ## Open
 
+### [trx-msj1] Add cross-repo issue search (P2, feature)
+Each .trx/ store is isolated per repo. Cannot search issues across all repos. Add a --all-repos flag (or trx search --global) that discovers .trx/ directories in sibling repos and merges results. Needed for cross-project queries like 'all open authentication bugs across all repos'.
+
+### [trx-yw64] Standardize list/search JSON output for cross-tool integration (P2, feature)
+For unified search across hstry/mmry/trx, results need a common envelope format: { source: 'trx', source_repo, id, title, content (description), status, priority, labels, created_at, metadata }. Ensure trx list --json output matches this schema so agntz can merge results from all three tools.
+
+### [trx-kx6q] Add --label filter to list (P2, feature)
+Issues have labels but list cannot filter by them. Add --label flag that filters issues containing the specified label. Support multiple --label flags for AND filtering. Labels are the cross-tool connector for unified search across hstry/mmry/trx.
+
+### [trx-jn7s] Add date range filters (--created-after/--created-before) to list (P2, feature)
+Issues have created_at/updated_at timestamps but list has no date range filter. Cannot say 'issues created this week'. Add --created-after and --created-before flags that filter on created_at. Accept relative formats ('1 week', '2 days') and ISO dates.
+
 ### [trx-pa3y] Custom ID prefix on create - 'trx create --id mmry-lrn' to control the generated issue ID prefix instead of random (P2, feature)
+
+### [trx-wfxe] Add --assignee filter to list (P3, feature)
+Issues have an assignee field but list cannot filter by it. Add --assignee flag. Support --assignee me for current user (from git config or AGENT_HARNESS env).
 
 ### [trx-cgs7] trx update should accept --description from stdin when value is '-', for adding long descriptions to existing issues (P3, feature)
 
