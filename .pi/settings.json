@@ -1,4 +1,4 @@
 {
-  "defaultModel": "claude-opus-4-6",
-  "defaultProvider": "anthropic"
+  "defaultModel": "qwen3.5-35b",
+  "defaultProvider": "zgx"
 }

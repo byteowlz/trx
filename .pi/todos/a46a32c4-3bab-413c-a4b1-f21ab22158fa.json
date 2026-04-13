@@ -1,0 +1,17 @@
+{
+  "todos": [
+    {
+      "id": "1",
+      "content": "Update TUI to use UnifiedStore instead of Store",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "2",
+      "content": "Test that TUI and CLI see the same issues",
+      "status": "completed",
+      "priority": "high"
+    }
+  ],
+  "updated_at": "2026-04-12T14:49:37.096Z"
+}

@@ -1,7 +1,12 @@
 # Issues
 
+## Open
+
+### [trx-4f80] Test issue for TUI sync verification (P3, task)
+
 ## Closed
 
+- [trx-b7x3] TUI uses Store instead of UnifiedStore, causing data inconsistency with V2 storage (closed 2026-04-12)
 - [trx-bqnp] Add trx sync options for message and dry-run (closed 2026-04-04)
 - [trx-wfxe] Add --assignee filter to list (closed 2026-04-04)
 - [trx-te7r] trx handover - generate compact one-line summary of all issues with dependency order for agent handoff (closed 2026-04-04)
