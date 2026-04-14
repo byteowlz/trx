@@ -163,7 +163,12 @@ pub fn list(
 ) -> Result<()> {
     let store = UnifiedStore::open()?;
 
-    let mut issues: Vec<_> = if epic.is_some() || all {
+    // Use list(false) to get all issues if:
+    // - --all flag is set
+    // - --epic is specified (need all to find descendants)
+    // - --status is specified (may need closed issues)
+    let need_all_issues = all || epic.is_some() || status.is_some();
+    let mut issues: Vec<_> = if need_all_issues {
         store.list(false)
     } else {
         store.list_open()
