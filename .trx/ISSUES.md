@@ -2,10 +2,20 @@
 
 ## Open
 
+### [trx-4td6] Drop V1 (issues.jsonl) storage backend; CRDT-only (P3, feature)
+## Why
+
+V2 (CRDT, automerge files under .trx/crdt/) has been the default for a while and is the only format new stores create (StorageVersion::default() == V2). Keeping V1 alive forces every method on trx-core to go through the UnifiedStore enum split (V1(Store) | V2(CrdtStore)), adding boilerplate without value:
+
+- crates/trx-core/src/unified_store.rs: every method matches on the variant
+...
+
+
 ### [trx-4f80] Test issue for TUI sync verification (P3, task)
 
 ## Closed
 
+- [trx-bwt9] Add open_at(root) constructors to embed trx-core in process (closed 2026-04-29)
 - [trx-b7x3] TUI uses Store instead of UnifiedStore, causing data inconsistency with V2 storage (closed 2026-04-12)
 - [trx-bqnp] Add trx sync options for message and dry-run (closed 2026-04-04)
 - [trx-wfxe] Add --assignee filter to list (closed 2026-04-04)
