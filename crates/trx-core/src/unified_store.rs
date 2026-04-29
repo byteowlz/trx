@@ -18,12 +18,20 @@ impl UnifiedStore {
     /// Open the store, auto-detecting the storage version
     pub fn open() -> Result<Self> {
         let root = Self::find_root()?;
+        Self::open_at(root)
+    }
+
+    /// Open the store at an explicit repo root, auto-detecting storage version
+    pub fn open_at(root: PathBuf) -> Result<Self> {
+        if !root.join(TRX_DIR).exists() {
+            return Err(Error::NotInitialized);
+        }
         let config_path = root.join(TRX_DIR).join(CONFIG_FILE);
         let config = Config::load(&config_path)?;
 
         match config.storage_version {
-            StorageVersion::V1 => Ok(UnifiedStore::V1(Store::open()?)),
-            StorageVersion::V2 => Ok(UnifiedStore::V2(CrdtStore::open()?)),
+            StorageVersion::V1 => Ok(UnifiedStore::V1(Store::open_at(root)?)),
+            StorageVersion::V2 => Ok(UnifiedStore::V2(CrdtStore::open_at(root)?)),
         }
     }
 

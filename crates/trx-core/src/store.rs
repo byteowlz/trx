@@ -22,6 +22,14 @@ impl Store {
     /// Find and open the store for the current directory
     pub fn open() -> Result<Self> {
         let root = Self::find_root()?;
+        Self::open_at(root)
+    }
+
+    /// Open the store at an explicit repo root (no CWD probing)
+    pub fn open_at(root: PathBuf) -> Result<Self> {
+        if !root.join(TRX_DIR).exists() {
+            return Err(Error::NotInitialized);
+        }
         let mut store = Self {
             root,
             issues: HashMap::new(),
