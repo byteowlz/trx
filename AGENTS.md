@@ -182,3 +182,19 @@ trx sync               # Commit .trx/ changes
 
 Priorities: 0=critical, 1=high, 2=medium, 3=low, 4=backlog
 
+## Changelog
+
+Keep `CHANGELOG.md` up to date. Format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) with `Added`,
+`Changed`, `Fixed`, `Removed`, `Deprecated`, `Security` sections.
+
+- For any user-visible change (CLI, TUI, public API in `trx-core`, file
+  formats, behavior), add a one-line entry under `## Unreleased` in the
+  same commit as the change.
+- When bumping the workspace version in `Cargo.toml`, rename the
+  `Unreleased` heading to `[<version>] - <YYYY-MM-DD>` and start a fresh
+  empty `Unreleased` section above it. Do this in the same commit as the
+  version bump so the release tag points at a complete CHANGELOG.
+- Skip the CHANGELOG only for purely internal changes with no user-visible
+  effect (refactors, test-only edits, doc tweaks).
+
