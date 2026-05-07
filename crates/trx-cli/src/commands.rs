@@ -3,9 +3,29 @@
 use anyhow::{Result, bail};
 use colored::Colorize;
 use trx_core::{
-    DependencyType, Issue, IssueGraph, IssueType, Status, StorageVersion, Store, UnifiedStore,
-    generate_id, id::generate_child_id, migrate_v1_to_v2, rollback_v2_to_v1,
+    AgentCtx, DependencyType, Event, EventAction, EventLog, Issue, IssueGraph, IssueType, Status,
+    Store, diff_issue, enrich_issue, generate_id, id::generate_child_id,
 };
+
+/// Append an event to `.trx/events.jsonl`. Failures are logged to stderr but
+/// never break the command — losing an audit entry is preferable to refusing
+/// the user's mutation.
+fn emit_event(store: &Store, event: Event) {
+    let log = EventLog::at(&store.trx_dir());
+    if let Err(e) = log.append(&event) {
+        eprintln!("warning: failed to append event log: {}", e);
+    }
+}
+
+/// Pick the action that best describes a status transition; falls back to
+/// `Updated` when status didn't change.
+fn action_for_update(before: &Issue, after: &Issue) -> EventAction {
+    match (before.status.is_closed(), after.status.is_closed()) {
+        (false, true) => EventAction::Closed,
+        (true, false) => EventAction::Reopened,
+        _ => EventAction::Updated,
+    }
+}
 
 /// Helper to get a mutable reference to a JSON object.
 /// Panics only if the value is not an object, which is a programmer error.
@@ -52,7 +72,7 @@ pub fn create(
     edit: bool,
     json: bool,
 ) -> Result<()> {
-    let mut store = UnifiedStore::open()?;
+    let mut store = Store::open()?;
     let prefix = custom_prefix.unwrap_or(store.prefix()?);
 
     let id = if let Some(ref parent_id) = parent {
@@ -76,7 +96,11 @@ pub fn create(
         issue.add_dependency(parent_id.clone(), DependencyType::ParentChild);
     }
 
+    let ctx = AgentCtx::from_env();
+    enrich_issue(&mut issue, &ctx);
+
     store.create(issue.clone())?;
+    emit_event(&store, Event::new(&issue.id, EventAction::Created, &ctx));
 
     if json {
         println!("{}", serde_json::to_string(&issue)?);
@@ -161,7 +185,7 @@ pub fn list(
     created_before: Option<String>,
     json: bool,
 ) -> Result<()> {
-    let store = UnifiedStore::open()?;
+    let store = Store::open()?;
 
     // Use list(false) to get all issues if:
     // - --all flag is set
@@ -366,7 +390,7 @@ pub fn list(
 }
 
 pub fn show(id: &str, json: bool) -> Result<()> {
-    let store = UnifiedStore::open()?;
+    let store = Store::open()?;
     let issue = store
         .get(id)
         .ok_or_else(|| anyhow::anyhow!("Issue not found: {}", id))?;
@@ -492,6 +516,22 @@ pub fn show(id: &str, json: bool) -> Result<()> {
                 );
             }
         }
+
+        // Recent activity (best-effort: skip silently on read errors so we
+        // never fail `show` because of a corrupt event log line).
+        if let Ok(events) = EventLog::at(&store.trx_dir()).read_all() {
+            let mut for_issue: Vec<&Event> =
+                events.iter().filter(|e| e.issue_id == id).collect();
+            for_issue.sort_by_key(|e| std::cmp::Reverse(e.timestamp));
+            for_issue.truncate(5);
+            if !for_issue.is_empty() {
+                println!();
+                println!("{}", "Recent activity:".bold());
+                for e in for_issue {
+                    print_event_line(e);
+                }
+            }
+        }
     }
 
     Ok(())
@@ -507,10 +547,11 @@ pub fn update(
     clear: Vec<String>,
     json: bool,
 ) -> Result<()> {
-    let mut store = UnifiedStore::open()?;
+    let mut store = Store::open()?;
     let issue = store
         .get_mut(id)
         .ok_or_else(|| anyhow::anyhow!("Issue not found: {}", id))?;
+    let before = issue.clone();
 
     if let Some(s) = status {
         issue.status = s.parse()?;
@@ -550,6 +591,16 @@ pub fn update(
     let issue = issue.clone();
     store.update(issue.clone())?;
 
+    let ctx = AgentCtx::from_env();
+    let changes = diff_issue(&before, &issue);
+    if !changes.is_empty() {
+        let action = action_for_update(&before, &issue);
+        emit_event(
+            &store,
+            Event::new(&issue.id, action, &ctx).with_changes(changes),
+        );
+    }
+
     if json {
         println!("{}", serde_json::to_string(&issue)?);
     } else {
@@ -559,27 +610,46 @@ pub fn update(
     Ok(())
 }
 
-pub fn close(id: &str, reason: Option<String>, json: bool) -> Result<()> {
-    let mut store = UnifiedStore::open()?;
-    let issue = store
-        .get_mut(id)
-        .ok_or_else(|| anyhow::anyhow!("Issue not found: {}", id))?;
+pub fn close(ids: &[String], reason: Option<String>, json: bool) -> Result<()> {
+    let mut store = Store::open()?;
+    let ctx = AgentCtx::from_env();
+    let mut closed: Vec<Issue> = Vec::new();
 
-    issue.close(reason);
-    let issue = issue.clone();
-    store.update(issue.clone())?;
+    for id in ids {
+        let issue = store
+            .get_mut(id)
+            .ok_or_else(|| anyhow::anyhow!("Issue not found: {}", id))?;
+        issue.close(reason.clone());
+        let snap = issue.clone();
+        store.update(snap.clone())?;
+
+        let mut event = Event::new(&snap.id, EventAction::Closed, &ctx);
+        if let Some(r) = &reason {
+            event = event.with_note(r.clone());
+        }
+        emit_event(&store, event);
+        closed.push(snap);
+    }
 
     if json {
-        println!("{}", serde_json::to_string(&issue)?);
+        println!("{}", serde_json::to_string(&closed)?);
     } else {
-        println!("{} Closed {}", "✓".green(), id);
+        for issue in &closed {
+            println!("{} Closed {}", "✓".green(), issue.id);
+        }
     }
 
     Ok(())
 }
 
-pub fn ready(json: bool) -> Result<()> {
-    let store = UnifiedStore::open()?;
+pub fn ready(
+    issue_type: Option<String>,
+    priority: Option<u8>,
+    label: Vec<String>,
+    limit: Option<usize>,
+    json: bool,
+) -> Result<()> {
+    let store = Store::open()?;
     let all_issues: Vec<_> = store.list(false);
     let open_issues: Vec<_> = all_issues
         .iter()
@@ -587,14 +657,50 @@ pub fn ready(json: bool) -> Result<()> {
         .copied()
         .collect();
     let graph = IssueGraph::from_issues(&open_issues);
-    let mut ready = graph.ready_issues(&open_issues);
+    let ready_all = graph.ready_issues(&open_issues);
+    let ready_ids: std::collections::HashSet<_> =
+        ready_all.iter().map(|i| i.id.as_str()).collect();
 
-    // Sort by priority
+    // Partition open issues into ready vs. truly-blocked BEFORE filtering, so
+    // a filter that hides a ready issue does not misclassify it as blocked.
+    let blocked_all: Vec<_> = open_issues
+        .iter()
+        .filter(|i| !ready_ids.contains(i.id.as_str()))
+        .copied()
+        .collect();
+
+    let type_filter = match issue_type {
+        Some(s) => Some(s.parse::<IssueType>()?),
+        None => None,
+    };
+    let matches = |i: &&Issue| -> bool {
+        if let Some(t) = type_filter
+            && i.issue_type != t
+        {
+            return false;
+        }
+        if let Some(p) = priority
+            && i.priority != p
+        {
+            return false;
+        }
+        for l in &label {
+            if !i.labels.iter().any(|il| il == l) {
+                return false;
+            }
+        }
+        true
+    };
+
+    let mut ready: Vec<&Issue> = ready_all.into_iter().filter(matches).collect();
+    let blocked: Vec<&Issue> = blocked_all.into_iter().filter(matches).collect();
     ready.sort_by_key(|a| a.priority);
+    if let Some(n) = limit {
+        ready.truncate(n);
+    }
 
     if json {
         let mut output = Vec::new();
-
         for issue in &ready {
             let mut val = serde_json::to_value(issue)?;
             if let Some(parent_dep) = issue
@@ -606,7 +712,6 @@ pub fn ready(json: bool) -> Result<()> {
             }
             output.push(val);
         }
-
         println!("{}", serde_json::to_string(&output)?);
     } else if ready.is_empty() {
         println!("No ready issues");
@@ -622,17 +727,10 @@ pub fn ready(json: bool) -> Result<()> {
             );
         }
 
-        // Show blocked issues with their blockers
-        let ready_ids: std::collections::HashSet<_> = ready.iter().map(|i| i.id.as_str()).collect();
-        let blocked: Vec<_> = open_issues
-            .iter()
-            .filter(|i| !ready_ids.contains(i.id.as_str()))
-            .collect();
-
         if !blocked.is_empty() {
             println!();
             println!("{}", "Blocked issues:".bold());
-            for issue in blocked {
+            for issue in &blocked {
                 let blockers: Vec<String> = issue
                     .dependencies
                     .iter()
@@ -656,53 +754,8 @@ pub fn ready(json: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn dep_add(id: &str, blocks: &str, json: bool) -> Result<()> {
-    let mut store = UnifiedStore::open()?;
-    let issue = store
-        .get_mut(id)
-        .ok_or_else(|| anyhow::anyhow!("Issue not found: {}", id))?;
-
-    let added = issue.add_dependency(blocks.to_string(), DependencyType::Blocks);
-    let issue = issue.clone();
-    store.update(issue.clone())?;
-
-    if json {
-        println!("{}", serde_json::to_string(&issue)?);
-    } else if added {
-        println!("{} {} now blocks {}", "✓".green(), id, blocks);
-    } else {
-        println!(
-            "{} {} already has a dependency on {}",
-            "!".yellow(),
-            id,
-            blocks
-        );
-    }
-
-    Ok(())
-}
-
-pub fn dep_rm(id: &str, blocks: &str, json: bool) -> Result<()> {
-    let mut store = UnifiedStore::open()?;
-    let issue = store
-        .get_mut(id)
-        .ok_or_else(|| anyhow::anyhow!("Issue not found: {}", id))?;
-
-    issue.remove_dependency(blocks);
-    let issue = issue.clone();
-    store.update(issue.clone())?;
-
-    if json {
-        println!("{}", serde_json::to_string(&issue)?);
-    } else {
-        println!("{} {} no longer blocks {}", "✓".green(), id, blocks);
-    }
-
-    Ok(())
-}
-
 pub fn dep_block(id: &str, by: &str, json: bool) -> Result<()> {
-    let mut store = UnifiedStore::open()?;
+    let mut store = Store::open()?;
 
     // Parse comma-separated blocker IDs
     let blocker_ids: Vec<&str> = by.split(',').map(|s| s.trim()).collect();
@@ -732,6 +785,16 @@ pub fn dep_block(id: &str, by: &str, json: bool) -> Result<()> {
     let issue = issue.clone();
     store.update(issue.clone())?;
 
+    if !added.is_empty() {
+        let ctx = AgentCtx::from_env();
+        for blocker_id in &added {
+            emit_event(
+                &store,
+                Event::new(&issue.id, EventAction::DepAdded, &ctx).with_note(*blocker_id),
+            );
+        }
+    }
+
     if json {
         println!("{}", serde_json::to_string(&issue)?);
     } else {
@@ -751,7 +814,7 @@ pub fn dep_block(id: &str, by: &str, json: bool) -> Result<()> {
 }
 
 pub fn dep_unblock(id: &str, by: &str, json: bool) -> Result<()> {
-    let mut store = UnifiedStore::open()?;
+    let mut store = Store::open()?;
 
     let blocker_ids: Vec<&str> = by.split(',').map(|s| s.trim()).collect();
 
@@ -759,12 +822,26 @@ pub fn dep_unblock(id: &str, by: &str, json: bool) -> Result<()> {
         .get_mut(id)
         .ok_or_else(|| anyhow::anyhow!("Issue not found: {}", id))?;
 
+    let mut removed = Vec::new();
     for blocker_id in &blocker_ids {
+        if issue.dependencies.iter().any(|d| d.depends_on_id == *blocker_id) {
+            removed.push(*blocker_id);
+        }
         issue.remove_dependency(blocker_id);
     }
 
     let issue = issue.clone();
     store.update(issue.clone())?;
+
+    if !removed.is_empty() {
+        let ctx = AgentCtx::from_env();
+        for blocker_id in &removed {
+            emit_event(
+                &store,
+                Event::new(&issue.id, EventAction::DepRemoved, &ctx).with_note(*blocker_id),
+            );
+        }
+    }
 
     if json {
         println!("{}", serde_json::to_string(&issue)?);
@@ -781,7 +858,7 @@ pub fn dep_unblock(id: &str, by: &str, json: bool) -> Result<()> {
 }
 
 pub fn dep_tree(id: &str, json: bool) -> Result<()> {
-    let store = UnifiedStore::open()?;
+    let store = Store::open()?;
     let issue = store
         .get(id)
         .ok_or_else(|| anyhow::anyhow!("Issue not found: {}", id))?;
@@ -798,7 +875,7 @@ pub fn dep_tree(id: &str, json: bool) -> Result<()> {
 }
 
 fn build_dep_tree_json(
-    store: &UnifiedStore,
+    store: &Store,
     issue: &Issue,
     visited: &mut Vec<String>,
 ) -> serde_json::Value {
@@ -860,7 +937,7 @@ fn build_dep_tree_json(
 }
 
 fn print_dep_tree(
-    store: &UnifiedStore,
+    store: &Store,
     issue: &Issue,
     prefix: &str,
     _is_last: bool,
@@ -963,8 +1040,9 @@ pub fn create_many(json_input: &str, dry_run: bool, json: bool) -> Result<()> {
         return Ok(());
     }
 
-    let mut store = UnifiedStore::open()?;
+    let mut store = Store::open()?;
     let prefix = store.prefix()?;
+    let ctx = AgentCtx::from_env();
     let mut results: Vec<serde_json::Value> = Vec::new();
 
     for (i, item) in items.iter().enumerate() {
@@ -1001,7 +1079,9 @@ pub fn create_many(json_input: &str, dry_run: bool, json: bool) -> Result<()> {
             }
         }
 
+        enrich_issue(&mut issue, &ctx);
         store.create(issue)?;
+        emit_event(&store, Event::new(&id, EventAction::Created, &ctx));
 
         results.push(serde_json::json!({
             "index": i,
@@ -1086,8 +1166,9 @@ pub fn plan_import(
         return Ok(());
     }
 
-    let mut store = UnifiedStore::open()?;
+    let mut store = Store::open()?;
     let prefix = store.prefix()?;
+    let ctx = AgentCtx::from_env();
 
     // Create the epic
     let epic_id = generate_id(&prefix);
@@ -1103,7 +1184,9 @@ pub fn plan_import(
     if let Some(desc) = epic_item["description"].as_str() {
         epic.description = Some(desc.to_string());
     }
+    enrich_issue(&mut epic, &ctx);
     store.create(epic)?;
+    emit_event(&store, Event::new(&epic_id, EventAction::Created, &ctx));
 
     let mut created_ids = vec![epic_id.clone()];
 
@@ -1136,7 +1219,9 @@ pub fn plan_import(
             }
         }
 
+        enrich_issue(&mut child, &ctx);
         store.create(child)?;
+        emit_event(&store, Event::new(&child_id, EventAction::Created, &ctx));
         created_ids.push(child_id);
     }
 
@@ -1450,17 +1535,8 @@ fn open_editor_for_description(current: &str, title: &str) -> Result<String> {
 }
 
 pub fn sync(message: Option<String>, dry_run: bool, no_commit: bool) -> Result<()> {
-    let mut store = UnifiedStore::open()?;
+    let store = Store::open()?;
     let trx_dir = store.trx_dir();
-
-    // Resolve any CRDT conflicts first (v2 only)
-    let resolved = store.resolve_conflicts()?;
-    if !resolved.is_empty() {
-        println!("{} Resolved {} conflict(s):", "✓".green(), resolved.len());
-        for file in &resolved {
-            println!("  - {}", file);
-        }
-    }
 
     if dry_run {
         // Show what would be staged
@@ -1521,7 +1597,7 @@ pub fn sync(message: Option<String>, dry_run: bool, no_commit: bool) -> Result<(
 // ============================================================================
 
 pub fn handover(json: bool) -> Result<()> {
-    let store = UnifiedStore::open()?;
+    let store = Store::open()?;
     let all_issues: Vec<_> = store.list(false);
     let open_issues: Vec<_> = all_issues
         .iter()
@@ -1623,7 +1699,7 @@ pub fn search(query: &str, all_repos: bool, json: bool) -> Result<()> {
                     // Try to open the store from that directory
                     let prev_dir = std::env::current_dir()?;
                     if std::env::set_current_dir(&path).is_ok() {
-                        if let Ok(store) = UnifiedStore::open() {
+                        if let Ok(store) = Store::open() {
                             for issue in store.list(false) {
                                 if matches_search(issue, &q_lower) {
                                     results.push((repo_name.clone(), issue.clone()));
@@ -1636,7 +1712,7 @@ pub fn search(query: &str, all_repos: bool, json: bool) -> Result<()> {
             }
         }
     } else {
-        let store = UnifiedStore::open()?;
+        let store = Store::open()?;
         let repo_name = std::env::current_dir()?
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
@@ -1699,129 +1775,13 @@ fn matches_search(issue: &Issue, q_lower: &str) -> bool {
             .any(|l| l.to_lowercase().contains(q_lower))
 }
 
-pub fn migrate(dry_run: bool, rollback: bool, yes: bool) -> Result<()> {
-    // Check current version
-    let store = UnifiedStore::open()?;
-    let current_version = store.version();
-    let trx_dir = store.trx_dir();
-    drop(store);
-
-    if rollback {
-        // Rollback v2 -> v1
-        if current_version == StorageVersion::V1 {
-            println!("Already using v1 (JSONL) storage");
-            return Ok(());
-        }
-
-        println!("{}", "Rollback: v2 (CRDT) -> v1 (JSONL)".bold());
-        println!();
-
-        if dry_run {
-            let result = rollback_v2_to_v1(true)?;
-            println!(
-                "Would migrate {} issues back to JSONL format",
-                result.issues_migrated
-            );
-            println!();
-            println!("Run without --dry-run to perform the rollback");
-            return Ok(());
-        }
-
-        if !yes {
-            println!("This will convert CRDT storage back to JSONL format.");
-            println!("The crdt/ directory will be preserved for safety.");
-            println!();
-            print!("Continue? [y/N] ");
-            std::io::Write::flush(&mut std::io::stdout())?;
-
-            let mut input = String::new();
-            std::io::stdin().read_line(&mut input)?;
-
-            if !input.trim().eq_ignore_ascii_case("y") {
-                println!("Aborted");
-                return Ok(());
-            }
-        }
-
-        let result = rollback_v2_to_v1(false)?;
-        println!(
-            "{} Rolled back {} issues to v1 (JSONL)",
-            "✓".green(),
-            result.issues_migrated
-        );
-        println!();
-        println!("Note: The crdt/ directory was preserved. You can remove it manually:");
-        if let Some(parent) = trx_dir.parent() {
-            println!("  rm -rf {}/.trx/crdt", parent.display());
-        }
-    } else {
-        // Migrate v1 -> v2
-        if current_version == StorageVersion::V2 {
-            println!("Already using v2 (CRDT) storage");
-            return Ok(());
-        }
-
-        println!("{}", "Migration: v1 (JSONL) -> v2 (CRDT)".bold());
-        println!();
-        println!("Benefits of v2:");
-        println!("  - Conflict-free merging across branches/worktrees");
-        println!("  - One file per issue (git handles additions automatically)");
-        println!("  - Human-readable ISSUES.md for browsing without trx");
-        println!();
-
-        if dry_run {
-            let result = migrate_v1_to_v2(true)?;
-            println!(
-                "Would migrate {} issues to CRDT format",
-                result.issues_migrated
-            );
-            println!();
-            println!("Run without --dry-run to perform the migration");
-            return Ok(());
-        }
-
-        if !yes {
-            println!("This will:");
-            println!("  1. Create .trx/crdt/ with one .automerge file per issue");
-            println!("  2. Generate .trx/ISSUES.md for human browsing");
-            println!("  3. Update config.toml to storage_version = \"v2\"");
-            println!("  4. Keep issues.jsonl as backup (can be removed later)");
-            println!();
-            print!("Continue? [y/N] ");
-            std::io::Write::flush(&mut std::io::stdout())?;
-
-            let mut input = String::new();
-            std::io::stdin().read_line(&mut input)?;
-
-            if !input.trim().eq_ignore_ascii_case("y") {
-                println!("Aborted");
-                return Ok(());
-            }
-        }
-
-        let result = migrate_v1_to_v2(false)?;
-        println!(
-            "{} Migrated {} issues to v2 (CRDT)",
-            "✓".green(),
-            result.issues_migrated
-        );
-        println!();
-        println!("The old issues.jsonl was preserved. You can remove it with:");
-        println!("  rm {}/issues.jsonl", trx_dir.display());
-        println!();
-        println!("Don't forget to commit the changes:");
-        println!("  trx sync -m \"Migrate to CRDT storage\"");
-    }
-
-    Ok(())
-}
-
 pub fn import(path: &str, prefix: Option<String>, json: bool) -> Result<()> {
     use std::fs::File;
     use std::io::{BufRead, BufReader};
 
-    let mut store = UnifiedStore::open()?;
+    let mut store = Store::open()?;
     let new_prefix = prefix.unwrap_or_else(|| store.prefix().unwrap_or_else(|_| "trx".to_string()));
+    let ctx = AgentCtx::from_env();
 
     let file = File::open(path)?;
     let reader = BufReader::new(file);
@@ -1911,7 +1871,9 @@ pub fn import(path: &str, prefix: Option<String>, json: bool) -> Result<()> {
         if store.get(&issue.id).is_some() {
             skipped += 1;
         } else {
+            let id = issue.id.clone();
             store.create(issue)?;
+            emit_event(&store, Event::new(&id, EventAction::Created, &ctx));
             imported += 1;
         }
     }
@@ -2067,7 +2029,7 @@ pub fn schema() -> Result<()> {
 
 /// Show current configuration
 pub fn config_show(json: bool) -> Result<()> {
-    let store = UnifiedStore::open()?;
+    let store = Store::open()?;
     let config_path = store.trx_dir().join("config.toml");
     let config = trx_core::Config::load(&config_path)?;
 
@@ -2107,7 +2069,7 @@ pub fn config_show(json: bool) -> Result<()> {
 
 /// Edit configuration file
 pub fn config_edit() -> Result<()> {
-    let store = UnifiedStore::open()?;
+    let store = Store::open()?;
     let config_path = store.trx_dir().join("config.toml");
 
     // Get editor from environment
@@ -2140,7 +2102,7 @@ pub fn config_edit() -> Result<()> {
 
 /// Reset configuration to defaults
 pub fn config_reset() -> Result<()> {
-    let store = UnifiedStore::open()?;
+    let store = Store::open()?;
     let config_path = store.trx_dir().join("config.toml");
 
     let default_config = trx_core::Config::default_with_comments();
@@ -2152,7 +2114,7 @@ pub fn config_reset() -> Result<()> {
 
 /// Get a specific config value
 pub fn config_get(key: &str, json: bool) -> Result<()> {
-    let store = UnifiedStore::open()?;
+    let store = Store::open()?;
     let config_path = store.trx_dir().join("config.toml");
     let config = trx_core::Config::load(&config_path)?;
 
@@ -2186,7 +2148,7 @@ pub fn config_get(key: &str, json: bool) -> Result<()> {
 
 /// Set a config value
 pub fn config_set(key: &str, value: &str) -> Result<()> {
-    let store = UnifiedStore::open()?;
+    let store = Store::open()?;
     let config_path = store.trx_dir().join("config.toml");
     let mut config = trx_core::Config::load(&config_path)?;
 
@@ -2245,190 +2207,6 @@ pub fn config_set(key: &str, value: &str) -> Result<()> {
 // ============================================================================
 // Resolve and merge driver commands
 // ============================================================================
-
-pub fn resolve(json: bool) -> Result<()> {
-    let mut store = UnifiedStore::open()?;
-
-    // Resolve any CRDT conflicts first (v2 only)
-    let resolved = store.resolve_conflicts()?;
-
-    // Regenerate ISSUES.md from source files
-    store.regenerate_issues_md()?;
-
-    if json {
-        println!(
-            r#"{{"resolved_conflicts": {}, "issues_md": "regenerated"}}"#,
-            resolved.len()
-        );
-    } else {
-        if !resolved.is_empty() {
-            println!(
-                "{} Resolved {} CRDT conflict(s):",
-                "✓".green(),
-                resolved.len()
-            );
-            for file in &resolved {
-                println!("  - {}", file);
-            }
-        }
-        println!("{} Regenerated ISSUES.md from source files", "✓".green());
-    }
-
-    Ok(())
-}
-
-/// Find the git repository root
-fn git_root() -> Result<std::path::PathBuf> {
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .output()?;
-    if !output.status.success() {
-        bail!("Not a git repository");
-    }
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Ok(std::path::PathBuf::from(path))
-}
-
-/// Find the trx binary path
-fn trx_binary_path() -> Result<std::path::PathBuf> {
-    std::env::current_exe().map_err(|e| anyhow::anyhow!("Failed to find trx binary: {}", e))
-}
-
-pub fn merge_driver_install() -> Result<()> {
-    let git_root = git_root()?;
-    let trx_bin = trx_binary_path()?;
-
-    // 1. Configure the merge driver in .git/config
-    let status = std::process::Command::new("git")
-        .args([
-            "config",
-            "merge.trx-issues-md.name",
-            "Auto-regenerate ISSUES.md from trx source files",
-        ])
-        .status()?;
-    if !status.success() {
-        bail!("Failed to set merge driver name");
-    }
-
-    let driver_cmd = format!("{} resolve", trx_bin.display());
-    let status = std::process::Command::new("git")
-        .args(["config", "merge.trx-issues-md.driver", &driver_cmd])
-        .status()?;
-    if !status.success() {
-        bail!("Failed to set merge driver command");
-    }
-
-    // 2. Add .gitattributes entry for ISSUES.md
-    let gitattributes_path = git_root.join(".gitattributes");
-    let attr_line = ".trx/ISSUES.md merge=trx-issues-md";
-
-    let existing = if gitattributes_path.exists() {
-        std::fs::read_to_string(&gitattributes_path)?
-    } else {
-        String::new()
-    };
-
-    if !existing.lines().any(|l| l.trim() == attr_line) {
-        let mut content = existing;
-        if !content.is_empty() && !content.ends_with('\n') {
-            content.push('\n');
-        }
-        content.push_str(attr_line);
-        content.push('\n');
-        std::fs::write(&gitattributes_path, content)?;
-    }
-
-    println!("{} Installed trx merge driver", "✓".green());
-    println!("  Merge driver: {}", driver_cmd);
-    println!("  .gitattributes: {}", attr_line);
-    println!();
-    println!("ISSUES.md conflicts will now be auto-resolved during git merge/rebase.");
-    println!("Remember to commit .gitattributes so the driver applies for all contributors.");
-
-    Ok(())
-}
-
-pub fn merge_driver_uninstall() -> Result<()> {
-    let git_root = git_root()?;
-
-    // 1. Remove merge driver from .git/config
-    let _ = std::process::Command::new("git")
-        .args(["config", "--remove-section", "merge.trx-issues-md"])
-        .status();
-
-    // 2. Remove .gitattributes entry
-    let gitattributes_path = git_root.join(".gitattributes");
-    let attr_line = ".trx/ISSUES.md merge=trx-issues-md";
-
-    if gitattributes_path.exists() {
-        let content = std::fs::read_to_string(&gitattributes_path)?;
-        let filtered: Vec<&str> = content.lines().filter(|l| l.trim() != attr_line).collect();
-
-        if filtered.is_empty() {
-            std::fs::remove_file(&gitattributes_path)?;
-        } else {
-            let mut new_content = filtered.join("\n");
-            new_content.push('\n');
-            std::fs::write(&gitattributes_path, new_content)?;
-        }
-    }
-
-    println!("{} Uninstalled trx merge driver", "✓".green());
-    println!("  Removed merge.trx-issues-md from git config");
-    println!("  Removed .gitattributes entry");
-
-    Ok(())
-}
-
-pub fn merge_driver_status() -> Result<()> {
-    let git_root = git_root()?;
-
-    // Check git config
-    let output = std::process::Command::new("git")
-        .args(["config", "--get", "merge.trx-issues-md.driver"])
-        .output()?;
-    let driver_configured = output.status.success();
-    let driver_cmd = if driver_configured {
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
-    } else {
-        String::new()
-    };
-
-    // Check .gitattributes
-    let gitattributes_path = git_root.join(".gitattributes");
-    let attr_line = ".trx/ISSUES.md merge=trx-issues-md";
-    let attr_configured = if gitattributes_path.exists() {
-        let content = std::fs::read_to_string(&gitattributes_path)?;
-        content.lines().any(|l| l.trim() == attr_line)
-    } else {
-        false
-    };
-
-    if driver_configured && attr_configured {
-        println!("Merge driver is {}", "installed".green());
-        println!("  Driver: {}", driver_cmd);
-        println!("  .gitattributes: {}", attr_line);
-    } else if driver_configured {
-        println!("Merge driver is {}", "partially installed".yellow());
-        println!("  Driver: {} (configured)", driver_cmd);
-        println!(
-            "  .gitattributes: {} (run 'trx merge-driver install' to fix)",
-            "missing".red()
-        );
-    } else if attr_configured {
-        println!("Merge driver is {}", "partially installed".yellow());
-        println!(
-            "  Driver: {} (run 'trx merge-driver install' to fix)",
-            "not configured".red()
-        );
-        println!("  .gitattributes: {} (present)", attr_line);
-    } else {
-        println!("Merge driver is {}", "not installed".yellow());
-        println!("  Run 'trx merge-driver install' to set up auto-resolution");
-    }
-
-    Ok(())
-}
 
 // ============================================================================
 // Service commands
@@ -2606,5 +2384,276 @@ pub fn service<T: ServiceCommand>(cmd: T) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+pub fn info(json: bool) -> Result<()> {
+    use trx_core::AgentCtx;
+
+    let ctx = AgentCtx::from_env();
+
+    // Store summary (best-effort: missing .trx is fine, just report it).
+    let store_info = match Store::open() {
+        Ok(store) => {
+            let trx_dir = store.trx_dir();
+            let issues = store.list(true);
+            let issue_count = issues.len();
+            let open_count = issues.iter().filter(|i| i.status.is_open()).count();
+            let closed_count = issues.iter().filter(|i| i.status.is_closed()).count();
+            let events_count = EventLog::at(&trx_dir)
+                .read_all()
+                .map(|v| v.len())
+                .unwrap_or(0);
+            Some(serde_json::json!({
+                "path": trx_dir.display().to_string(),
+                "format": "jsonl",
+                "migrate_pending": store.migrate_pending(),
+                "issues": issue_count,
+                "open": open_count,
+                "closed": closed_count,
+                "events": events_count,
+            }))
+        }
+        Err(_) => None,
+    };
+
+    if json {
+        let out = serde_json::json!({
+            "agent_ctx": ctx,
+            "store": store_info,
+            "trx_version": env!("CARGO_PKG_VERSION"),
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    println!("{} {}", "trx".bold(), env!("CARGO_PKG_VERSION"));
+    println!();
+
+    println!("{}", "Store:".bold());
+    match &store_info {
+        Some(s) => {
+            println!("  path     {}", s["path"].as_str().unwrap_or("?"));
+            println!("  format   {}", s["format"].as_str().unwrap_or("?"));
+            if s["migrate_pending"].as_bool() == Some(true) {
+                println!(
+                    "  {} legacy CRDT layout detected — will migrate on next mutation",
+                    "!".yellow()
+                );
+            }
+            println!(
+                "  issues   {} ({} open, {} closed)",
+                s["issues"], s["open"], s["closed"]
+            );
+            println!("  events   {}", s["events"]);
+        }
+        None => {
+            println!("  {} not initialized in this directory", "!".yellow());
+        }
+    }
+    println!();
+
+    println!("{}", "AGENT_CTX:".bold());
+    if ctx.is_empty() {
+        println!("  {} no AGENT_CTX_* variables set", "·".dimmed());
+    } else {
+        let rows: &[(&str, Option<&str>)] = &[
+            ("version", ctx.version.as_deref()),
+            ("platform", ctx.platform.as_deref()),
+            ("platform_version", ctx.platform_version.as_deref()),
+            ("harness", ctx.harness.as_deref()),
+            ("run_mode", ctx.run_mode.as_deref()),
+            ("user_id", ctx.user_id.as_deref()),
+            ("workspace_id", ctx.workspace_id.as_deref()),
+            ("workspace_path", ctx.workspace_path.as_deref()),
+            ("platform_session_id", ctx.platform_session_id.as_deref()),
+            ("harness_session_id", ctx.harness_session_id.as_deref()),
+            ("session_name", ctx.session_name.as_deref()),
+            ("readable_id", ctx.readable_id.as_deref()),
+            ("model", ctx.model.as_deref()),
+            ("request_id", ctx.request_id.as_deref()),
+            ("correlation_id", ctx.correlation_id.as_deref()),
+            ("sandbox_profile", ctx.sandbox_profile.as_deref()),
+        ];
+        for (k, v) in rows {
+            if let Some(v) = v {
+                println!("  {:<20} {}", k, v);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// Event log queries: trx history / trx events
+// ============================================================================
+
+/// Apply common event filters and ordering. Used by both `history` and
+/// `events`. Sort is descending by timestamp (most recent first), and the
+/// limit is applied after sorting.
+fn filter_events(
+    mut events: Vec<Event>,
+    issue: Option<&str>,
+    session: Option<&str>,
+    user: Option<&str>,
+    action: Option<EventAction>,
+    since: Option<chrono::DateTime<chrono::Utc>>,
+    until: Option<chrono::DateTime<chrono::Utc>>,
+    limit: Option<usize>,
+) -> Vec<Event> {
+    events.retain(|e| {
+        if let Some(id) = issue
+            && e.issue_id != id
+        {
+            return false;
+        }
+        if let Some(s) = session
+            && !e.matches_session(s)
+        {
+            return false;
+        }
+        if let Some(u) = user
+            && e.user_id.as_deref() != Some(u)
+        {
+            return false;
+        }
+        if let Some(a) = action
+            && e.action != a
+        {
+            return false;
+        }
+        if let Some(t) = since
+            && e.timestamp < t
+        {
+            return false;
+        }
+        if let Some(t) = until
+            && e.timestamp > t
+        {
+            return false;
+        }
+        true
+    });
+    events.sort_by_key(|e| std::cmp::Reverse(e.timestamp));
+    if let Some(n) = limit {
+        events.truncate(n);
+    }
+    events
+}
+
+fn print_event_line(e: &Event) {
+    let ts = e.timestamp.format("%Y-%m-%d %H:%M:%S");
+    let action = e.action.to_string();
+    let action_colored = match e.action {
+        EventAction::Created => action.green().to_string(),
+        EventAction::Closed => action.blue().to_string(),
+        EventAction::Reopened => action.yellow().to_string(),
+        EventAction::Deleted => action.red().to_string(),
+        _ => action,
+    };
+    let who = e
+        .user_id
+        .as_deref()
+        .or(e.session_name.as_deref())
+        .or(e.platform_session_id.as_deref())
+        .or(e.harness_session_id.as_deref())
+        .unwrap_or("-");
+    print!(
+        "{} {} {} by {}",
+        ts.to_string().dimmed(),
+        e.issue_id.cyan(),
+        action_colored,
+        who.dimmed()
+    );
+    if let Some(note) = &e.note {
+        print!(" — {}", note);
+    }
+    if !e.changes.is_empty() {
+        let fields: Vec<String> = e
+            .changes
+            .iter()
+            .map(|c| match (&c.from, &c.to) {
+                (Some(f), Some(t)) => format!("{}: {} → {}", c.field, f, t),
+                (None, Some(t)) => format!("{}: ∅ → {}", c.field, t),
+                (Some(f), None) => format!("{}: {} → ∅", c.field, f),
+                (None, None) => c.field.clone(),
+            })
+            .collect();
+        print!(" [{}]", fields.join(", "));
+    }
+    println!();
+}
+
+pub fn history(id: &str, limit: Option<usize>, json: bool) -> Result<()> {
+    let store = Store::open()?;
+    if store.get(id).is_none() {
+        bail!("Issue not found: {}", id);
+    }
+    let log = EventLog::at(&store.trx_dir());
+    let events = log.read_all()?;
+    let filtered = filter_events(events, Some(id), None, None, None, None, None, limit);
+
+    if json {
+        println!("{}", serde_json::to_string(&filtered)?);
+    } else if filtered.is_empty() {
+        println!("No events for {}", id);
+    } else {
+        println!("{} {} ({} event{})", "History:".bold(), id.cyan(), filtered.len(), if filtered.len() == 1 { "" } else { "s" });
+        for e in &filtered {
+            print_event_line(e);
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn events(
+    issue: Option<String>,
+    session: Option<String>,
+    user: Option<String>,
+    action: Option<String>,
+    since: Option<String>,
+    until: Option<String>,
+    limit: Option<usize>,
+    json: bool,
+) -> Result<()> {
+    let store = Store::open()?;
+    let log = EventLog::at(&store.trx_dir());
+    let all = log.read_all()?;
+
+    let action_parsed = match action {
+        Some(s) => Some(s.parse::<EventAction>().map_err(|e| anyhow::anyhow!("{}", e))?),
+        None => None,
+    };
+    let since_parsed = match since {
+        Some(s) => Some(parse_date(&s)?),
+        None => None,
+    };
+    let until_parsed = match until {
+        Some(s) => Some(parse_date(&s)?),
+        None => None,
+    };
+
+    let filtered = filter_events(
+        all,
+        issue.as_deref(),
+        session.as_deref(),
+        user.as_deref(),
+        action_parsed,
+        since_parsed,
+        until_parsed,
+        limit,
+    );
+
+    if json {
+        println!("{}", serde_json::to_string(&filtered)?);
+    } else if filtered.is_empty() {
+        println!("No events match");
+    } else {
+        for e in &filtered {
+            print_event_line(e);
+        }
+    }
     Ok(())
 }

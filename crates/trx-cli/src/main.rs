@@ -35,7 +35,7 @@ enum Commands {
         title: String,
 
         /// Issue type (bug, feature, task, epic, chore)
-        #[arg(short = 't', long, default_value = "task")]
+        #[arg(short = 't', long = "type", default_value = "task")]
         issue_type: String,
 
         /// Priority (0=critical, 1=high, 2=medium, 3=low, 4=backlog)
@@ -66,7 +66,7 @@ enum Commands {
         status: Option<String>,
 
         /// Filter by type (bug, feature, task, epic, chore)
-        #[arg(short = 't', long)]
+        #[arg(short = 't', long = "type")]
         issue_type: Option<String>,
 
         /// Filter by priority (0-4)
@@ -142,10 +142,11 @@ enum Commands {
         clear: Vec<String>,
     },
 
-    /// Close an issue
+    /// Close one or more issues
     Close {
-        /// Issue ID
-        id: String,
+        /// Issue ID(s)
+        #[arg(required = true)]
+        ids: Vec<String>,
 
         /// Reason for closing
         #[arg(short, long)]
@@ -153,7 +154,23 @@ enum Commands {
     },
 
     /// Show ready (unblocked) issues
-    Ready,
+    Ready {
+        /// Filter by type (bug, feature, task, epic, chore)
+        #[arg(short = 't', long = "type")]
+        issue_type: Option<String>,
+
+        /// Filter by priority (0-4)
+        #[arg(short = 'P', long)]
+        priority: Option<u8>,
+
+        /// Filter by label (multiple --label flags for AND filtering)
+        #[arg(long)]
+        label: Vec<String>,
+
+        /// Limit number of issues shown
+        #[arg(short = 'l', long)]
+        limit: Option<usize>,
+    },
 
     /// Manage dependencies
     Dep {
@@ -206,21 +223,6 @@ enum Commands {
         all_repos: bool,
     },
 
-    /// Migrate storage format
-    Migrate {
-        /// Preview migration without making changes
-        #[arg(long)]
-        dry_run: bool,
-
-        /// Rollback from v2 to v1
-        #[arg(long)]
-        rollback: bool,
-
-        /// Skip confirmation prompt
-        #[arg(long, short)]
-        yes: bool,
-    },
-
     /// Import from beads
     Import {
         /// Path to beads issues.jsonl
@@ -241,15 +243,6 @@ enum Commands {
     /// Output JSON schema for config file
     Schema,
 
-    /// Resolve merge conflicts in ISSUES.md by regenerating from source files
-    Resolve,
-
-    /// Manage git merge driver for auto-resolving ISSUES.md conflicts
-    MergeDriver {
-        #[command(subcommand)]
-        command: MergeDriverCommands,
-    },
-
     /// Show or edit configuration
     Config {
         #[command(subcommand)]
@@ -260,6 +253,52 @@ enum Commands {
     Service {
         #[command(subcommand)]
         command: ServiceCommands,
+    },
+
+    /// Show effective AGENT_CTX context, store summary, and trx version
+    Info,
+
+    /// Show event history for a single issue
+    History {
+        /// Issue ID
+        id: String,
+
+        /// Limit number of events shown (most recent first)
+        #[arg(short = 'l', long)]
+        limit: Option<usize>,
+    },
+
+    /// Query the event log across issues
+    Events {
+        /// Filter by issue ID
+        #[arg(long)]
+        issue: Option<String>,
+
+        /// Filter by AGENT_CTX session id (matches platform_session_id or
+        /// harness_session_id)
+        #[arg(long)]
+        session: Option<String>,
+
+        /// Filter by AGENT_CTX user id
+        #[arg(long)]
+        user: Option<String>,
+
+        /// Filter by event action (created, updated, closed, reopened,
+        /// dep_added, dep_removed, session_linked, deleted, restored)
+        #[arg(long)]
+        action: Option<String>,
+
+        /// Show events at or after this date (ISO or relative: '1 week')
+        #[arg(long)]
+        since: Option<String>,
+
+        /// Show events at or before this date
+        #[arg(long)]
+        until: Option<String>,
+
+        /// Limit number of events shown (most recent first)
+        #[arg(short = 'l', long)]
+        limit: Option<usize>,
     },
 }
 
@@ -307,39 +346,7 @@ enum ServiceCommands {
 }
 
 #[derive(Subcommand)]
-enum MergeDriverCommands {
-    /// Install git merge driver for auto-resolving ISSUES.md conflicts
-    Install,
-
-    /// Remove the git merge driver configuration
-    Uninstall,
-
-    /// Show merge driver status
-    Status,
-}
-
-#[derive(Subcommand)]
 enum DepCommands {
-    /// Add a dependency
-    Add {
-        /// Issue ID
-        id: String,
-
-        /// Issue this blocks
-        #[arg(long)]
-        blocks: String,
-    },
-
-    /// Remove a dependency
-    Rm {
-        /// Issue ID
-        id: String,
-
-        /// Issue to unblock
-        #[arg(long)]
-        blocks: String,
-    },
-
     /// Mark an issue as blocked by one or more blockers
     Block {
         /// The issue that is blocked
@@ -463,11 +470,14 @@ fn main() -> Result<()> {
             clear,
             cli.json,
         ),
-        Commands::Close { id, reason } => commands::close(&id, reason, cli.json),
-        Commands::Ready => commands::ready(cli.json),
+        Commands::Close { ids, reason } => commands::close(&ids, reason, cli.json),
+        Commands::Ready {
+            issue_type,
+            priority,
+            label,
+            limit,
+        } => commands::ready(issue_type, priority, label, limit, cli.json),
         Commands::Dep { command } => match command {
-            DepCommands::Add { id, blocks } => commands::dep_add(&id, &blocks, cli.json),
-            DepCommands::Rm { id, blocks } => commands::dep_rm(&id, &blocks, cli.json),
             DepCommands::Block { id, by } => commands::dep_block(&id, &by, cli.json),
             DepCommands::Unblock { id, by } => commands::dep_unblock(&id, &by, cli.json),
             DepCommands::Tree { id } => commands::dep_tree(&id, cli.json),
@@ -492,20 +502,9 @@ fn main() -> Result<()> {
         } => commands::sync(message, dry_run, no_commit),
         Commands::Handover => commands::handover(cli.json),
         Commands::Search { query, all_repos } => commands::search(&query, all_repos, cli.json),
-        Commands::Migrate {
-            dry_run,
-            rollback,
-            yes,
-        } => commands::migrate(dry_run, rollback, yes),
         Commands::Import { path, prefix } => commands::import(&path, prefix, cli.json),
         Commands::PurgeBeads { force } => commands::purge_beads(force),
         Commands::Schema => commands::schema(),
-        Commands::Resolve => commands::resolve(cli.json),
-        Commands::MergeDriver { command } => match command {
-            MergeDriverCommands::Install => commands::merge_driver_install(),
-            MergeDriverCommands::Uninstall => commands::merge_driver_uninstall(),
-            MergeDriverCommands::Status => commands::merge_driver_status(),
-        },
         Commands::Config { command } => match command {
             Some(ConfigCommands::Show) => commands::config_show(cli.json),
             Some(ConfigCommands::Edit) => commands::config_edit(),
@@ -515,6 +514,17 @@ fn main() -> Result<()> {
             None => commands::config_show(cli.json),
         },
         Commands::Service { command } => commands::service(command),
+        Commands::Info => commands::info(cli.json),
+        Commands::History { id, limit } => commands::history(&id, limit, cli.json),
+        Commands::Events {
+            issue,
+            session,
+            user,
+            action,
+            since,
+            until,
+            limit,
+        } => commands::events(issue, session, user, action, since, until, limit, cli.json),
     }
 }
 

@@ -22,7 +22,7 @@ use ratatui::{
 use std::collections::HashSet;
 use std::io;
 use std::time::{Duration, Instant};
-use trx_core::{Issue, IssueGraph, Status, UnifiedStore};
+use trx_core::{Issue, IssueGraph, Status, Store};
 
 #[derive(Parser)]
 #[command(name = "trx-tui")]
@@ -62,7 +62,7 @@ fn main() -> Result<()> {
 }
 
 fn run_robot_mode(mode: RobotMode) -> Result<()> {
-    let store = UnifiedStore::open()?;
+    let store = Store::open()?;
     let issues = store.list_open();
 
     match mode {
@@ -110,7 +110,7 @@ fn run_tui(_workspace: Option<String>, _repo: Option<String>) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let store = UnifiedStore::open()?;
+    let store = Store::open()?;
     let mut app = App::new(store)?;
 
     let res = run_app(&mut terminal, &mut app);
@@ -230,7 +230,7 @@ struct App {
     selection: SelectionState,
     details_scroll: usize,
 
-    store: UnifiedStore,
+    store: Store,
 
     status_message: Option<String>,
     status_message_time: Option<Instant>,
@@ -445,7 +445,7 @@ impl FilterState {
 }
 
 impl App {
-    fn new(store: UnifiedStore) -> Result<Self> {
+    fn new(store: Store) -> Result<Self> {
         let mut app = Self {
             filtered_issues: Vec::new(),
             mode: AppMode::Normal,

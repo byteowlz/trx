@@ -349,6 +349,16 @@ impl Issue {
     }
 }
 
+impl std::fmt::Display for Issue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} [P{}] [{}] {} - {}",
+            self.id, self.priority, self.issue_type, self.status, self.title
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,15 +401,5 @@ mod tests {
     fn test_dependency_type_parse_accepts_hyphen() {
         let dt: DependencyType = "parent-child".parse().unwrap();
         assert_eq!(dt, DependencyType::ParentChild);
-    }
-}
-
-impl std::fmt::Display for Issue {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{} [P{}] [{}] {} - {}",
-            self.id, self.priority, self.issue_type, self.status, self.title
-        )
     }
 }
