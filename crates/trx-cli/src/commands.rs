@@ -2657,3 +2657,156 @@ pub fn events(
     }
     Ok(())
 }
+
+// ============================================================================
+// Markdown export: trx export
+// ============================================================================
+
+pub fn export(
+    output: Option<String>,
+    include_closed: bool,
+    issue_type: Option<String>,
+    labels: Vec<String>,
+) -> Result<()> {
+    let store = Store::open()?;
+
+    let type_filter = match issue_type {
+        Some(s) => Some(s.parse::<IssueType>()?),
+        None => None,
+    };
+
+    let mut issues: Vec<&Issue> = store
+        .list(false)
+        .into_iter()
+        .filter(|i| include_closed || i.status.is_open())
+        .filter(|i| {
+            if let Some(t) = type_filter
+                && i.issue_type != t
+            {
+                return false;
+            }
+            for l in &labels {
+                if !i.labels.iter().any(|il| il == l) {
+                    return false;
+                }
+            }
+            true
+        })
+        .collect();
+
+    issues.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.id.cmp(&b.id)));
+
+    let groups: &[(Status, &str)] = &[
+        (Status::Open, "Open"),
+        (Status::InProgress, "In Progress"),
+        (Status::Blocked, "Blocked"),
+        (Status::Closed, "Closed"),
+    ];
+
+    let mut md = String::new();
+    md.push_str("# Issues\n\n");
+    md.push_str(&format!(
+        "_Generated {} by trx {}._\n\n",
+        chrono::Utc::now().format("%Y-%m-%d %H:%M UTC"),
+        env!("CARGO_PKG_VERSION")
+    ));
+
+    for (status, label) in groups {
+        let in_group: Vec<&&Issue> = issues.iter().filter(|i| i.status == *status).collect();
+        if in_group.is_empty() {
+            continue;
+        }
+        md.push_str(&format!("## {} ({})\n\n", label, in_group.len()));
+        for issue in in_group {
+            render_issue_md(&mut md, issue, &store);
+        }
+    }
+
+    if let Some(path) = output {
+        std::fs::write(&path, md.as_bytes())?;
+        eprintln!("{} Wrote {}", "✓".green(), path);
+    } else {
+        print!("{}", md);
+    }
+    Ok(())
+}
+
+fn render_issue_md(md: &mut String, issue: &Issue, store: &Store) {
+    md.push_str(&format!(
+        "### {} — {} `[P{}]` `[{}]`\n\n",
+        issue.id, issue.title, issue.priority, issue.issue_type
+    ));
+
+    if let Some(desc) = &issue.description {
+        md.push_str(desc.trim());
+        md.push_str("\n\n");
+    }
+
+    let mut meta: Vec<String> = Vec::new();
+    meta.push(format!("Created: {}", issue.created_at.format("%Y-%m-%d")));
+    if !issue.labels.is_empty() {
+        meta.push(format!("Labels: {}", issue.labels.join(", ")));
+    }
+    if let Some(a) = &issue.assignee {
+        meta.push(format!("Assignee: {}", a));
+    }
+    if let Some(c) = &issue.created_by {
+        meta.push(format!("Created by: {}", c));
+    }
+    if let Some(reason) = &issue.close_reason {
+        meta.push(format!("Closed: {}", reason));
+    }
+
+    let parent: Option<&str> = issue
+        .dependencies
+        .iter()
+        .find(|d| d.dep_type == DependencyType::ParentChild)
+        .map(|d| d.depends_on_id.as_str());
+    if let Some(p) = parent {
+        meta.push(format!("Parent: {}", p));
+    }
+
+    let blocked_by: Vec<&str> = issue
+        .dependencies
+        .iter()
+        .filter(|d| d.dep_type == DependencyType::Blocks)
+        .map(|d| d.depends_on_id.as_str())
+        .collect();
+    if !blocked_by.is_empty() {
+        meta.push(format!("Blocked by: {}", blocked_by.join(", ")));
+    }
+
+    // Reverse links: issues that depend on this one.
+    let blocks: Vec<&str> = store
+        .list(false)
+        .into_iter()
+        .filter(|i| {
+            i.dependencies
+                .iter()
+                .any(|d| d.depends_on_id == issue.id && d.dep_type == DependencyType::Blocks)
+        })
+        .map(|i| i.id.as_str())
+        .collect();
+    if !blocks.is_empty() {
+        meta.push(format!("Blocks: {}", blocks.join(", ")));
+    }
+
+    let children: Vec<&str> = store
+        .list(false)
+        .into_iter()
+        .filter(|i| {
+            i.dependencies
+                .iter()
+                .any(|d| d.depends_on_id == issue.id && d.dep_type == DependencyType::ParentChild)
+        })
+        .map(|i| i.id.as_str())
+        .collect();
+    if !children.is_empty() {
+        meta.push(format!("Children: {}", children.join(", ")));
+    }
+
+    for line in meta {
+        md.push_str(&format!("- {}\n", line));
+    }
+    md.push('\n');
+}

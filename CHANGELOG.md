@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## [0.5.1] - 2026-05-08
+
+### Added
+
+- `trx export`: one-shot Markdown rendering of all issues, grouped by
+  status (Open / In Progress / Blocked / Closed) and sorted by
+  (priority, id). `-o PATH` writes to a file; default is stdout.
+  `--all` includes closed issues; `-t/--type` and `--label` filter the
+  output. Not auto-regenerated — call it whenever you want a snapshot.
+
 ## [0.5.0] - 2026-05-07
 
 ### Added

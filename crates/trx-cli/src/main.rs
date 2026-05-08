@@ -258,6 +258,25 @@ enum Commands {
     /// Show effective AGENT_CTX context, store summary, and trx version
     Info,
 
+    /// Render issues as Markdown (one-shot; not auto-regenerated)
+    Export {
+        /// Write to a file instead of stdout
+        #[arg(short, long)]
+        output: Option<String>,
+
+        /// Include closed issues (default: open/in_progress/blocked only)
+        #[arg(short, long)]
+        all: bool,
+
+        /// Filter by type (bug, feature, task, epic, chore)
+        #[arg(short = 't', long = "type")]
+        issue_type: Option<String>,
+
+        /// Filter by label (multiple --label flags for AND filtering)
+        #[arg(long)]
+        label: Vec<String>,
+    },
+
     /// Show event history for a single issue
     History {
         /// Issue ID
@@ -515,6 +534,12 @@ fn main() -> Result<()> {
         },
         Commands::Service { command } => commands::service(command),
         Commands::Info => commands::info(cli.json),
+        Commands::Export {
+            output,
+            all,
+            issue_type,
+            label,
+        } => commands::export(output, all, issue_type, label),
         Commands::History { id, limit } => commands::history(&id, limit, cli.json),
         Commands::Events {
             issue,
