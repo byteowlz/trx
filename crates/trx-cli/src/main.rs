@@ -104,6 +104,14 @@ enum Commands {
         /// Show issues created before this date (ISO or relative: '1 week', '2 days')
         #[arg(long)]
         created_before: Option<String>,
+
+        /// Sort by field: priority (default), created, updated, closed, id, status
+        #[arg(long, default_value = "priority")]
+        sort: String,
+
+        /// Reverse the sort order
+        #[arg(long)]
+        reverse: bool,
     },
 
     /// Show issue details
@@ -287,6 +295,129 @@ enum Commands {
         limit: Option<usize>,
     },
 
+    /// Chronological activity feed grouped by session
+    Log {
+        /// Filter by AGENT_CTX session id (matches platform_session_id or
+        /// harness_session_id)
+        #[arg(long)]
+        session: Option<String>,
+
+        /// Filter by AGENT_CTX user id
+        #[arg(long)]
+        user: Option<String>,
+
+        /// Filter by event action
+        #[arg(long)]
+        action: Option<String>,
+
+        /// Filter by issue ID
+        #[arg(long)]
+        issue: Option<String>,
+
+        /// Show events at or after this date (ISO or relative: '1 week')
+        #[arg(long)]
+        since: Option<String>,
+
+        /// Show events at or before this date
+        #[arg(long)]
+        until: Option<String>,
+
+        /// Limit number of events shown (most recent first)
+        #[arg(short = 'l', long)]
+        limit: Option<usize>,
+
+        /// Flat output: don't group events into session blocks
+        #[arg(long)]
+        no_group: bool,
+
+        /// Show AGENT_CTX details inline under each event
+        #[arg(short = 'v', long)]
+        verbose: bool,
+    },
+
+    /// List sessions seen in the event log (or drill into one)
+    Sessions {
+        /// Show full event trace for this session id
+        session: Option<String>,
+
+        /// Filter by AGENT_CTX user id
+        #[arg(long)]
+        user: Option<String>,
+
+        /// Show only sessions active at or after this date
+        #[arg(long)]
+        since: Option<String>,
+
+        /// Show only sessions active at or before this date
+        #[arg(long)]
+        until: Option<String>,
+
+        /// Limit number of sessions shown (most recent first)
+        #[arg(short = 'l', long)]
+        limit: Option<usize>,
+
+        /// Verbose drilldown (include AGENT_CTX lines per event)
+        #[arg(short = 'v', long)]
+        verbose: bool,
+    },
+
+    /// Calendar heatmap of activity (GitHub-style contributions grid)
+    Heatmap {
+        /// Show only events at or after this date
+        #[arg(long)]
+        since: Option<String>,
+
+        /// Number of weeks to display (default: 13)
+        #[arg(short = 'w', long, default_value = "13")]
+        weeks: usize,
+
+        /// Filter by AGENT_CTX user id
+        #[arg(long)]
+        user: Option<String>,
+    },
+
+    /// Swimlane view: issue × time grid showing which issue was touched when
+    Swimlane {
+        /// Show only events at or after this date (default: 30 days)
+        #[arg(long)]
+        since: Option<String>,
+
+        /// Show only events at or before this date
+        #[arg(long)]
+        until: Option<String>,
+
+        /// Number of time-bucket columns (default: auto from terminal width)
+        #[arg(long)]
+        cols: Option<usize>,
+
+        /// Max issues to show (default: 20, sorted by most-recent activity)
+        #[arg(short = 'l', long, default_value = "20")]
+        limit: usize,
+
+        /// Filter by AGENT_CTX session id
+        #[arg(long)]
+        session: Option<String>,
+
+        /// Filter by AGENT_CTX user id
+        #[arg(long)]
+        user: Option<String>,
+    },
+
+    /// Activity statistics: counts, sparkline, breakdowns
+    Stats {
+        /// Show only events at or after this date (default: 30 days)
+        #[arg(long)]
+        since: Option<String>,
+
+        /// Show only events at or before this date
+        #[arg(long)]
+        until: Option<String>,
+
+        /// Sparkline bucket: 'day' (default) or 'hour'
+        #[arg(long, default_value = "day")]
+        by: String,
+    },
+
     /// Query the event log across issues
     Events {
         /// Filter by issue ID
@@ -456,6 +587,8 @@ fn main() -> Result<()> {
             assignee,
             created_after,
             created_before,
+            sort,
+            reverse,
         } => commands::list(
             status,
             issue_type,
@@ -468,6 +601,8 @@ fn main() -> Result<()> {
             assignee,
             created_after,
             created_before,
+            sort,
+            reverse,
             cli.json,
         ),
         Commands::Show { id } => commands::show(&id, cli.json),
@@ -550,6 +685,37 @@ fn main() -> Result<()> {
             until,
             limit,
         } => commands::events(issue, session, user, action, since, until, limit, cli.json),
+        Commands::Log {
+            session,
+            user,
+            action,
+            issue,
+            since,
+            until,
+            limit,
+            no_group,
+            verbose,
+        } => commands::log(
+            issue, session, user, action, since, until, limit, no_group, verbose, cli.json,
+        ),
+        Commands::Sessions {
+            session,
+            user,
+            since,
+            until,
+            limit,
+            verbose,
+        } => commands::sessions(session, user, since, until, limit, verbose, cli.json),
+        Commands::Stats { since, until, by } => commands::stats(since, until, &by, cli.json),
+        Commands::Heatmap { since, weeks, user } => commands::heatmap(since, weeks, user, cli.json),
+        Commands::Swimlane {
+            since,
+            until,
+            cols,
+            limit,
+            session,
+            user,
+        } => commands::swimlane(since, until, cols, limit, session, user, cli.json),
     }
 }
 

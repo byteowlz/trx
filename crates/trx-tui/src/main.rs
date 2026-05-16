@@ -6,7 +6,8 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
+        self, DisableMouseCapture, EnableMouseCapture, Event as CrosstermEvent, KeyCode, KeyEvent,
+        KeyModifiers,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -22,7 +23,10 @@ use ratatui::{
 use std::collections::HashSet;
 use std::io;
 use std::time::{Duration, Instant};
-use trx_core::{Issue, IssueGraph, Status, Store};
+use trx_core::{
+    Event, EventAction, EventLog, FieldChange, Issue, IssueGraph, SessionSummary, Status, Store,
+    summarize_sessions,
+};
 
 #[derive(Parser)]
 #[command(name = "trx-tui")]
@@ -142,7 +146,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
             .unwrap_or_else(|| Duration::from_secs(0));
 
         if event::poll(timeout)?
-            && let Event::Key(key) = event::read()?
+            && let CrosstermEvent::Key(key) = event::read()?
         {
             let action = parse_key_action(key);
             if app.handle_key_action(action)? {
@@ -167,6 +171,7 @@ enum AppMode {
     WhichKey(WhichKeyContext),
     AddIssue,
     EditIssue,
+    Dashboard,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -236,6 +241,32 @@ struct App {
     status_message_time: Option<Instant>,
 
     issue_form: IssueForm,
+
+    // Event log + visualizations.
+    events: Vec<Event>,
+    sessions: Vec<SessionSummary>,
+    session_selection: SelectionState,
+    middle_view: MiddleView,
+    detail_view: DetailView,
+    verbose_ctx: bool,
+    follow: bool,
+    follow_counter: u32,
+}
+
+/// Which list the middle pane shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MiddleView {
+    Issues,
+    Sessions,
+}
+
+/// Which pane the right pane shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DetailView {
+    /// Issue metadata (the original view).
+    Issue,
+    /// Event timeline (per-issue or per-session depending on `MiddleView`).
+    Activity,
 }
 
 struct IssueForm {
@@ -458,10 +489,67 @@ impl App {
             status_message: None,
             status_message_time: None,
             issue_form: IssueForm::new(),
+            events: Vec::new(),
+            sessions: Vec::new(),
+            session_selection: SelectionState::new(),
+            middle_view: MiddleView::Issues,
+            detail_view: DetailView::Issue,
+            verbose_ctx: false,
+            follow: false,
+            follow_counter: 0,
         };
 
         app.apply_filters()?;
+        app.reload_events();
         Ok(app)
+    }
+
+    /// Reload `.trx/events.jsonl` into the in-memory cache and recompute
+    /// session summaries. Errors are reported via the status bar — losing the
+    /// activity feed shouldn't crash the TUI.
+    fn reload_events(&mut self) {
+        let log = EventLog::at(&self.store.trx_dir());
+        match log.read_all() {
+            Ok(mut all) => {
+                all.sort_by_key(|e| e.timestamp);
+                self.sessions = summarize_sessions(&all);
+                self.events = all;
+                let max = self.sessions.len();
+                if self.session_selection.index >= max {
+                    self.session_selection.index = max.saturating_sub(1);
+                }
+            }
+            Err(e) => {
+                self.show_status(format!("event log error: {}", e));
+            }
+        }
+    }
+
+    /// Events for the currently selected issue (or empty when nothing
+    /// selected), oldest → newest.
+    fn events_for_selected_issue(&self) -> Vec<&Event> {
+        let Some(issue) = self.current_issue() else {
+            return Vec::new();
+        };
+        self.events
+            .iter()
+            .filter(|e| e.issue_id == issue.id)
+            .collect()
+    }
+
+    /// Events for the currently selected session (oldest → newest).
+    fn events_for_selected_session(&self) -> Vec<&Event> {
+        let Some(session) = self.current_session() else {
+            return Vec::new();
+        };
+        self.events
+            .iter()
+            .filter(|e| e.session_key().unwrap_or("-") == session.session_id)
+            .collect()
+    }
+
+    fn current_session(&self) -> Option<&SessionSummary> {
+        self.sessions.get(self.session_selection.index)
     }
 
     fn apply_filters(&mut self) -> Result<()> {
@@ -502,7 +590,34 @@ impl App {
             AppMode::WhichKey(ctx) => self.handle_which_key_mode(ctx, action),
             AppMode::AddIssue => self.handle_add_issue_mode(action),
             AppMode::EditIssue => self.handle_edit_issue_mode(action),
+            AppMode::Dashboard => self.handle_dashboard_mode(action),
         }
+    }
+
+    fn handle_dashboard_mode(&mut self, action: KeyAction) -> Result<bool> {
+        match action {
+            KeyAction::Quit => return Ok(true),
+            KeyAction::Escape | KeyAction::Char('D') | KeyAction::Char('q') => {
+                self.mode = AppMode::Normal;
+                self.details_scroll = 0;
+            }
+            KeyAction::Char('F') => {
+                self.follow = !self.follow;
+                self.show_status(format!(
+                    "Follow: {}",
+                    if self.follow { "ON" } else { "off" }
+                ));
+            }
+            KeyAction::Char('r') => {
+                self.reload_events();
+                self.show_status("Refreshed".to_string());
+            }
+            KeyAction::Char('?') => {
+                self.mode = AppMode::Help;
+            }
+            _ => {}
+        }
+        Ok(false)
     }
 
     fn handle_normal_mode(&mut self, action: KeyAction) -> Result<bool> {
@@ -512,12 +627,26 @@ impl App {
                 self.mode = AppMode::Normal;
                 self.g_prefix = false;
             }
-            KeyAction::Up => self.selection.previous(),
-            KeyAction::Down => self.selection.next(self.filtered_issues.len(), 20),
-            KeyAction::PageDown => {
-                self.selection.page_down(self.filtered_issues.len(), 20);
-            }
-            KeyAction::PageUp => self.selection.page_up(),
+            KeyAction::Up => match self.middle_view {
+                MiddleView::Issues => self.selection.previous(),
+                MiddleView::Sessions => self.session_selection.previous(),
+            },
+            KeyAction::Down => match self.middle_view {
+                MiddleView::Issues => self.selection.next(self.filtered_issues.len(), 20),
+                MiddleView::Sessions => self.session_selection.next(self.sessions.len(), 20),
+            },
+            KeyAction::PageDown => match self.middle_view {
+                MiddleView::Issues => {
+                    self.selection.page_down(self.filtered_issues.len(), 20);
+                }
+                MiddleView::Sessions => {
+                    self.session_selection.page_down(self.sessions.len(), 20);
+                }
+            },
+            KeyAction::PageUp => match self.middle_view {
+                MiddleView::Issues => self.selection.page_up(),
+                MiddleView::Sessions => self.session_selection.page_up(),
+            },
             KeyAction::Char('g') => {
                 if self.g_prefix {
                     self.selection.top();
@@ -584,7 +713,65 @@ impl App {
             }
             KeyAction::Char('r') => {
                 self.apply_filters()?;
+                self.reload_events();
                 self.show_status("Refreshed".to_string());
+            }
+            KeyAction::Char('S') => {
+                self.middle_view = match self.middle_view {
+                    MiddleView::Issues => MiddleView::Sessions,
+                    MiddleView::Sessions => MiddleView::Issues,
+                };
+                // When swapping to sessions, default the right pane to
+                // Activity since "session details" only really exist as a
+                // timeline of events.
+                if self.middle_view == MiddleView::Sessions {
+                    self.detail_view = DetailView::Activity;
+                }
+                self.details_scroll = 0;
+                self.show_status(format!(
+                    "View: {}",
+                    match self.middle_view {
+                        MiddleView::Issues => "Issues",
+                        MiddleView::Sessions => "Sessions",
+                    }
+                ));
+            }
+            KeyAction::Char('T') => {
+                self.detail_view = match self.detail_view {
+                    DetailView::Issue => DetailView::Activity,
+                    DetailView::Activity => DetailView::Issue,
+                };
+                self.details_scroll = 0;
+                self.show_status(format!(
+                    "Right pane: {}",
+                    match self.detail_view {
+                        DetailView::Issue => "Issue details",
+                        DetailView::Activity => "Activity",
+                    }
+                ));
+            }
+            KeyAction::Char('v') => {
+                self.verbose_ctx = !self.verbose_ctx;
+                self.show_status(format!(
+                    "AGENT_CTX: {}",
+                    if self.verbose_ctx {
+                        "verbose"
+                    } else {
+                        "compact"
+                    }
+                ));
+            }
+            KeyAction::Char('F') => {
+                self.follow = !self.follow;
+                self.show_status(format!(
+                    "Follow: {}",
+                    if self.follow { "ON" } else { "off" }
+                ));
+            }
+            KeyAction::Char('D') => {
+                self.mode = AppMode::Dashboard;
+                self.details_scroll = 0;
+                self.show_status("Dashboard — press D or Esc to exit".to_string());
             }
             KeyAction::Char('t') => {
                 self.mode = AppMode::WhichKey(WhichKeyContext::Type);
@@ -883,6 +1070,19 @@ impl App {
             self.status_message = None;
             self.status_message_time = None;
         }
+
+        // Follow mode: re-read the event log every ~2s so newly emitted events
+        // appear without manual refresh. Cheap because the file is small and
+        // append-only.
+        if self.follow {
+            self.follow_counter += 1;
+            // Tick is ~250ms; refresh every 8 ticks = 2s.
+            if self.follow_counter >= 8 {
+                self.follow_counter = 0;
+                self.reload_events();
+                let _ = self.apply_filters();
+            }
+        }
     }
 
     fn handle_add_issue_mode(&mut self, action: KeyAction) -> Result<bool> {
@@ -1153,6 +1353,12 @@ fn ui(f: &mut Frame, app: &mut App) {
         .constraints([Constraint::Min(0), Constraint::Length(1)].as_ref())
         .split(size);
 
+    if app.mode == AppMode::Dashboard {
+        render_dashboard(f, app, main_chunks[0]);
+        render_status_bar(f, app, main_chunks[1]);
+        return;
+    }
+
     let content_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -1163,8 +1369,14 @@ fn ui(f: &mut Frame, app: &mut App) {
         .split(main_chunks[0]);
 
     render_left_pane(f, app, content_chunks[0]);
-    render_middle_pane(f, app, content_chunks[1]);
-    render_right_pane(f, app, content_chunks[2]);
+    match app.middle_view {
+        MiddleView::Issues => render_middle_pane(f, app, content_chunks[1]),
+        MiddleView::Sessions => render_sessions_pane(f, app, content_chunks[1]),
+    }
+    match app.detail_view {
+        DetailView::Issue => render_right_pane(f, app, content_chunks[2]),
+        DetailView::Activity => render_activity_pane(f, app, content_chunks[2]),
+    }
     render_status_bar(f, app, main_chunks[1]);
 
     match &app.mode {
@@ -1469,6 +1681,332 @@ fn render_right_pane(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_widget(paragraph, area);
 }
 
+// ============================================================================
+// Sessions view + activity pane
+// ============================================================================
+
+fn action_color(a: EventAction) -> Color {
+    match a {
+        EventAction::Created => Color::Green,
+        EventAction::Closed => Color::Blue,
+        EventAction::Reopened => Color::Yellow,
+        EventAction::Deleted => Color::Red,
+        EventAction::Restored => Color::Green,
+        EventAction::DepAdded | EventAction::DepRemoved => Color::Magenta,
+        EventAction::SessionLinked => Color::Cyan,
+        EventAction::Updated => Color::White,
+    }
+}
+
+fn format_field_change(c: &FieldChange) -> String {
+    match (&c.from, &c.to) {
+        (Some(f), Some(t)) => format!("{}: {} → {}", c.field, f, t),
+        (None, Some(t)) => format!("{}: ∅ → {}", c.field, t),
+        (Some(f), None) => format!("{}: {} → ∅", c.field, f),
+        (None, None) => c.field.clone(),
+    }
+}
+
+/// Returns a non-empty session name distinct from the session id, or None.
+fn session_name_display(s: &SessionSummary) -> Option<String> {
+    let n = s.session_name.as_deref()?.trim();
+    if n.is_empty() || n == s.session_id {
+        return None;
+    }
+    Some(n.to_string())
+}
+
+/// Compact AGENT_CTX line for an event, e.g. `claude-code · my-sess · opus-4.7`.
+fn event_ctx_compact(e: &Event) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(h) = &e.harness {
+        parts.push(h.clone());
+    } else if let Some(p) = &e.platform {
+        parts.push(p.clone());
+    }
+    if let Some(n) = &e.session_name {
+        parts.push(n.clone());
+    }
+    if let Some(m) = &e.model {
+        parts.push(m.clone());
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" · "))
+    }
+}
+
+fn event_ctx_verbose(e: &Event) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut push = |label: &str, val: &Option<String>| {
+        if let Some(v) = val {
+            out.push((label.to_string(), v.clone()));
+        }
+    };
+    push("user", &e.user_id);
+    push("platform", &e.platform);
+    push("harness", &e.harness);
+    push("session", &e.session_name);
+    push("plat_sid", &e.platform_session_id);
+    push("harn_sid", &e.harness_session_id);
+    push("workspace", &e.workspace_id);
+    push("model", &e.model);
+    push("request", &e.request_id);
+    push("correlate", &e.correlation_id);
+    out
+}
+
+/// Push the timeline rendering of one event onto `lines`. Same shape used by
+/// per-issue and per-session activity views.
+fn render_event_lines(lines: &mut Vec<Line<'static>>, e: &Event, verbose: bool) {
+    let ts = e.timestamp.format("%Y-%m-%d %H:%M:%S").to_string();
+    let action_str = e.action.to_string();
+    lines.push(Line::from(vec![
+        Span::styled(ts, Style::default().fg(Color::DarkGray)),
+        Span::raw("  "),
+        Span::styled(
+            format!("{:<10}", action_str),
+            Style::default()
+                .fg(action_color(e.action))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(e.issue_id.clone(), Style::default().fg(Color::Cyan)),
+    ]));
+    if let Some(note) = &e.note {
+        lines.push(Line::from(vec![
+            Span::raw("    "),
+            Span::styled("› ", Style::default().fg(Color::DarkGray)),
+            Span::raw(note.clone()),
+        ]));
+    }
+    for c in &e.changes {
+        lines.push(Line::from(vec![
+            Span::raw("    "),
+            Span::styled("· ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format_field_change(c), Style::default().fg(Color::DarkGray)),
+        ]));
+    }
+    if verbose {
+        for (label, val) in event_ctx_verbose(e) {
+            lines.push(Line::from(vec![
+                Span::raw("    "),
+                Span::styled(
+                    format!("{:<10}", format!("{}:", label)),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::raw(" "),
+                Span::styled(val, Style::default().fg(Color::DarkGray)),
+            ]));
+        }
+    } else if let Some(ctx) = event_ctx_compact(e) {
+        lines.push(Line::from(vec![
+            Span::raw("    "),
+            Span::styled(format!("[{}]", ctx), Style::default().fg(Color::DarkGray)),
+        ]));
+    }
+}
+
+fn render_sessions_pane(f: &mut Frame, app: &mut App, area: Rect) {
+    let items: Vec<ListItem> = app
+        .sessions
+        .iter()
+        .enumerate()
+        .map(|(idx, s)| {
+            let is_cursor = idx == app.session_selection.index;
+            let prefix = if is_cursor { "> " } else { "  " };
+            let mut header_spans = vec![
+                Span::raw(prefix),
+                Span::styled(
+                    s.session_id.clone(),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    format!("{} evt", s.event_count),
+                    Style::default().fg(Color::Yellow),
+                ),
+            ];
+            if let Some(name) = session_name_display(s) {
+                header_spans.push(Span::raw("  "));
+                header_spans.push(Span::styled(
+                    name,
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+            let header = Line::from(header_spans);
+            let user = s.user_id.as_deref().unwrap_or("-");
+            let harness = s
+                .harness
+                .as_deref()
+                .or(s.platform.as_deref())
+                .unwrap_or("-");
+            let model = s.model.as_deref().unwrap_or("-");
+            let sub = Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    format!("{} · {} · {}", user, harness, model),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]);
+            let range = format!(
+                "{} → {}",
+                s.first_at.format("%Y-%m-%d %H:%M"),
+                s.last_at.format("%H:%M")
+            );
+            let when = Line::from(vec![
+                Span::raw("  "),
+                Span::styled(range, Style::default().fg(Color::DarkGray)),
+            ]);
+            ListItem::new(Text::from(vec![header, sub, when]))
+        })
+        .collect();
+
+    let title = if app.follow {
+        format!("Sessions ({})  ● follow", app.sessions.len())
+    } else {
+        format!("Sessions ({})", app.sessions.len())
+    };
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Blue))
+                .title(title),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        );
+
+    f.render_stateful_widget(
+        list,
+        area,
+        &mut ratatui::widgets::ListState::default()
+            .with_selected(Some(app.session_selection.index))
+            .with_offset(app.session_selection.offset),
+    );
+}
+
+fn render_activity_pane(f: &mut Frame, app: &mut App, area: Rect) {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let title: String;
+
+    match app.middle_view {
+        MiddleView::Issues => {
+            let events = app.events_for_selected_issue();
+            if let Some(issue) = app.current_issue() {
+                title = format!("Activity — {} ({} events)", issue.id, events.len());
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        issue.id.clone(),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw("  "),
+                    Span::styled(issue.title.clone(), Style::default()),
+                ]));
+                lines.push(Line::from(""));
+            } else {
+                title = "Activity".to_string();
+            }
+            if events.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "No events for this issue.",
+                    Style::default().fg(Color::DarkGray),
+                )));
+            } else {
+                for e in &events {
+                    render_event_lines(&mut lines, e, app.verbose_ctx);
+                    lines.push(Line::from(""));
+                }
+            }
+        }
+        MiddleView::Sessions => {
+            let events = app.events_for_selected_session();
+            if let Some(s) = app.current_session() {
+                title = format!("Session — {} ({} events)", s.session_id, events.len());
+                let user = s.user_id.as_deref().unwrap_or("-");
+                let harness = s
+                    .harness
+                    .as_deref()
+                    .or(s.platform.as_deref())
+                    .unwrap_or("-");
+                let model = s.model.as_deref().unwrap_or("-");
+                let mut id_spans = vec![Span::styled(
+                    s.session_id.clone(),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )];
+                if let Some(name) = session_name_display(s) {
+                    id_spans.push(Span::raw("  "));
+                    id_spans.push(Span::styled(
+                        name,
+                        Style::default()
+                            .fg(Color::Magenta)
+                            .add_modifier(Modifier::BOLD),
+                    ));
+                }
+                lines.push(Line::from(id_spans));
+                lines.push(Line::from(vec![Span::styled(
+                    format!("{} · {} · {}", user, harness, model),
+                    Style::default().fg(Color::DarkGray),
+                )]));
+                lines.push(Line::from(vec![Span::styled(
+                    format!(
+                        "{} → {}   issues: {}",
+                        s.first_at.format("%Y-%m-%d %H:%M"),
+                        s.last_at.format("%H:%M"),
+                        s.issue_ids.len()
+                    ),
+                    Style::default().fg(Color::DarkGray),
+                )]));
+                lines.push(Line::from(""));
+            } else {
+                title = "Session".to_string();
+            }
+            if events.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "No events for this session.",
+                    Style::default().fg(Color::DarkGray),
+                )));
+            } else {
+                for e in &events {
+                    render_event_lines(&mut lines, e, app.verbose_ctx);
+                    lines.push(Line::from(""));
+                }
+            }
+        }
+    }
+
+    let title = if app.follow {
+        format!("{}  ● follow", title)
+    } else {
+        title
+    };
+
+    let paragraph = Paragraph::new(Text::from(lines))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Blue))
+                .title(title),
+        )
+        .wrap(Wrap { trim: false })
+        .scroll((app.details_scroll as u16, 0));
+
+    f.render_widget(paragraph, area);
+}
+
 fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let mode_text = match app.mode {
         AppMode::Normal => "[NORMAL]",
@@ -1479,6 +2017,7 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
         AppMode::WhichKey(_) => "[WHICHKEY]",
         AppMode::AddIssue => "[ADD ISSUE]",
         AppMode::EditIssue => "[EDIT ISSUE]",
+        AppMode::Dashboard => "[DASHBOARD]",
     };
 
     let mode_style = match app.mode {
@@ -1498,11 +2037,25 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
         ])
     } else {
         let selected_count = app.selection.selected_indices.len();
+        let view_tag = match app.middle_view {
+            MiddleView::Issues => "Issues",
+            MiddleView::Sessions => "Sessions",
+        };
+        let detail_tag = match app.detail_view {
+            DetailView::Issue => "Det",
+            DetailView::Activity => "Act",
+        };
+        let follow_tag = if app.follow { " ● follow" } else { "" };
         Line::from(vec![
             Span::styled(mode_text, mode_style),
             Span::raw(" | "),
-            Span::raw(format!("Selected: {} | ", selected_count)),
-            Span::raw("[:a]dd [:e]dit [:c]lose [1-4]status [:s]ort [:?]help [/]search [:q]uit"),
+            Span::raw(format!(
+                "View:{}/{}{} | Sel:{} | ",
+                view_tag, detail_tag, follow_tag, selected_count
+            )),
+            Span::raw(
+                "[S]essions [T]imeline [v]erbose [F]ollow [a]dd [e]dit [c]lose [/]search [?]help [q]uit",
+            ),
         ])
     };
 
@@ -1552,6 +2105,13 @@ fn render_help_overlay(f: &mut Frame) {
         Line::from("  ?          Help"),
         Line::from("  q          Quit"),
         Line::from("  Esc        Return to normal mode"),
+        Line::from(""),
+        Line::from("Activity / events:"),
+        Line::from("  S          Toggle middle pane: Issues ↔ Sessions"),
+        Line::from("  T          Toggle right pane: Issue details ↔ Activity"),
+        Line::from("  v          Toggle verbose AGENT_CTX in activity"),
+        Line::from("  F          Toggle follow mode (live-tail events)"),
+        Line::from("  D          Enter Dashboard (heatmap + bars + live tail)"),
     ];
 
     let paragraph = Paragraph::new(help_text)
@@ -1928,4 +2488,357 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+// =============================================================================
+// Dashboard mode: full-screen visual summary built from `app.events`.
+// =============================================================================
+
+fn render_dashboard(f: &mut Frame, app: &App, area: Rect) {
+    let title = if app.follow {
+        format!("Dashboard ({} events)  ● follow", app.events.len())
+    } else {
+        format!("Dashboard ({} events)", app.events.len())
+    };
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Magenta))
+        .title(title);
+    let inner = outer.inner(area);
+    f.render_widget(outer, area);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(11),
+            Constraint::Min(8),
+            Constraint::Length(12),
+        ])
+        .split(inner);
+
+    render_dashboard_heatmap(f, app, rows[0]);
+
+    let mid = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+        .split(rows[1]);
+    render_dashboard_bars(f, app, mid[0]);
+    render_dashboard_sessions(f, app, mid[1]);
+
+    render_dashboard_tail(f, app, rows[2]);
+}
+
+fn render_dashboard_heatmap(f: &mut Frame, app: &App, area: Rect) {
+    use chrono::{Datelike, Duration as ChronoDuration, NaiveDate, Utc};
+
+    // 13 weeks Mon-anchored grid, matching CLI heatmap.
+    let weeks = 13usize;
+    let today = Utc::now().date_naive();
+    let today_weekday = today.weekday().num_days_from_monday() as i64;
+    let last_monday = today - ChronoDuration::days(today_weekday);
+    let start = last_monday - ChronoDuration::days(7 * (weeks as i64 - 1));
+
+    let mut counts: std::collections::HashMap<NaiveDate, usize> = std::collections::HashMap::new();
+    for e in &app.events {
+        let d = e.timestamp.date_naive();
+        if d >= start && d <= today {
+            *counts.entry(d).or_insert(0) += 1;
+        }
+    }
+
+    let day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // Month header row.
+    let mut header = String::from("      ");
+    let mut last_month: Option<u32> = None;
+    for w in 0..weeks {
+        let d = start + ChronoDuration::days((w * 7) as i64);
+        let m = d.month();
+        if last_month != Some(m) {
+            let name = match m {
+                1 => "Jan",
+                2 => "Feb",
+                3 => "Mar",
+                4 => "Apr",
+                5 => "May",
+                6 => "Jun",
+                7 => "Jul",
+                8 => "Aug",
+                9 => "Sep",
+                10 => "Oct",
+                11 => "Nov",
+                _ => "Dec",
+            };
+            header.push_str(name);
+            header.push(' ');
+            last_month = Some(m);
+        } else {
+            header.push_str("  ");
+        }
+    }
+    lines.push(Line::from(Span::styled(
+        header,
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    for (row, dn) in day_names.iter().enumerate() {
+        let mut spans: Vec<Span> = Vec::with_capacity(weeks * 2 + 2);
+        spans.push(Span::styled(
+            format!("{:<4} ", dn),
+            Style::default().fg(Color::DarkGray),
+        ));
+        for w in 0..weeks {
+            let d = start + ChronoDuration::days((w * 7 + row) as i64);
+            if d > today {
+                spans.push(Span::raw("  "));
+                continue;
+            }
+            let c = *counts.get(&d).unwrap_or(&0);
+            let (glyph, color) = heatmap_cell(c);
+            spans.push(Span::styled(glyph, Style::default().fg(color)));
+            spans.push(Span::raw(" "));
+        }
+        lines.push(Line::from(spans));
+    }
+
+    // Legend.
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("  Legend  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("·", Style::default().fg(Color::DarkGray)),
+        Span::raw(" 0   "),
+        Span::styled("▒", Style::default().fg(Color::Green)),
+        Span::raw(" 1–2   "),
+        Span::styled("▓", Style::default().fg(Color::Green)),
+        Span::raw(" 3–5   "),
+        Span::styled("█", Style::default().fg(Color::LightGreen)),
+        Span::raw(" 6+"),
+    ]));
+
+    let para = Paragraph::new(Text::from(lines)).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Blue))
+            .title(format!("Heatmap · last {} weeks", weeks)),
+    );
+    f.render_widget(para, area);
+}
+
+fn heatmap_cell(count: usize) -> (&'static str, Color) {
+    match count {
+        0 => ("·", Color::DarkGray),
+        1..=2 => ("▒", Color::Green),
+        3..=5 => ("▓", Color::Green),
+        _ => ("█", Color::LightGreen),
+    }
+}
+
+fn render_dashboard_bars(f: &mut Frame, app: &App, area: Rect) {
+    // Aggregate by action and by user.
+    let mut by_action: std::collections::HashMap<EventAction, usize> =
+        std::collections::HashMap::new();
+    let mut by_user: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for e in &app.events {
+        *by_action.entry(e.action).or_insert(0) += 1;
+        let u = e.user_id.clone().unwrap_or_else(|| "-".to_string());
+        *by_user.entry(u).or_insert(0) += 1;
+    }
+
+    let max_action = by_action.values().copied().max().unwrap_or(1).max(1);
+    let max_user = by_user.values().copied().max().unwrap_or(1).max(1);
+
+    let bar_w: usize = 18;
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        "By action",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )));
+    let mut action_rows: Vec<(EventAction, usize)> = by_action.into_iter().collect();
+    action_rows.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+    for (a, n) in action_rows.into_iter().take(8) {
+        let filled = ((n as f64 / max_action as f64) * bar_w as f64).round() as usize;
+        let bar: String = "█".repeat(filled.min(bar_w));
+        let empty: String = " ".repeat(bar_w.saturating_sub(filled));
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  {:<8}", a.to_string()),
+                Style::default().fg(action_color(a)),
+            ),
+            Span::raw(" "),
+            Span::styled(bar, Style::default().fg(action_color(a))),
+            Span::raw(empty),
+            Span::raw(" "),
+            Span::styled(n.to_string(), Style::default().fg(Color::Yellow)),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "By user",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )));
+    let mut user_rows: Vec<(String, usize)> = by_user.into_iter().collect();
+    user_rows.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+    for (u, n) in user_rows.into_iter().take(6) {
+        let filled = ((n as f64 / max_user as f64) * bar_w as f64).round() as usize;
+        let bar: String = "█".repeat(filled.min(bar_w));
+        let empty: String = " ".repeat(bar_w.saturating_sub(filled));
+        let label = if u.len() > 12 {
+            format!("{}…", &u[..11])
+        } else {
+            u.clone()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  {:<12}", label),
+                Style::default().fg(Color::Magenta),
+            ),
+            Span::raw(" "),
+            Span::styled(bar, Style::default().fg(Color::Magenta)),
+            Span::raw(empty),
+            Span::raw(" "),
+            Span::styled(n.to_string(), Style::default().fg(Color::Yellow)),
+        ]));
+    }
+
+    let para = Paragraph::new(Text::from(lines)).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Blue))
+            .title("Breakdown"),
+    );
+    f.render_widget(para, area);
+}
+
+fn render_dashboard_sessions(f: &mut Frame, app: &App, area: Rect) {
+    let total_events = app.events.len().max(1);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if app.sessions.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No sessions yet.",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        for s in app.sessions.iter().take(8) {
+            let frac = s.event_count as f64 / total_events as f64;
+            let bar_w = 12usize;
+            let filled = (frac * bar_w as f64).round() as usize;
+            let bar: String = "▰".repeat(filled.min(bar_w));
+            let empty: String = "▱".repeat(bar_w.saturating_sub(filled));
+            let mut row_spans = vec![
+                Span::styled(
+                    s.session_id.clone(),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  "),
+                Span::styled(bar, Style::default().fg(Color::Green)),
+                Span::styled(empty, Style::default().fg(Color::DarkGray)),
+                Span::raw("  "),
+                Span::styled(
+                    format!("{:>3}", s.event_count),
+                    Style::default().fg(Color::Yellow),
+                ),
+            ];
+            if let Some(name) = session_name_display(s) {
+                row_spans.push(Span::raw("  "));
+                row_spans.push(Span::styled(name, Style::default().fg(Color::Magenta)));
+            }
+            lines.push(Line::from(row_spans));
+            let user = s.user_id.as_deref().unwrap_or("-");
+            let harness = s
+                .harness
+                .as_deref()
+                .or(s.platform.as_deref())
+                .unwrap_or("-");
+            let model = s.model.as_deref().unwrap_or("-");
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    format!("{} · {} · {}", user, harness, model),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    format!(
+                        "{} → {}  ({} issues)",
+                        s.first_at.format("%m-%d %H:%M"),
+                        s.last_at.format("%H:%M"),
+                        s.issue_ids.len()
+                    ),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+            lines.push(Line::from(""));
+        }
+    }
+
+    let para = Paragraph::new(Text::from(lines))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Blue))
+                .title(format!("Top sessions ({} total)", app.sessions.len())),
+        )
+        .wrap(Wrap { trim: false });
+    f.render_widget(para, area);
+}
+
+fn render_dashboard_tail(f: &mut Frame, app: &App, area: Rect) {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let n = (area.height as usize).saturating_sub(2).max(1);
+    let tail: Vec<&Event> = app.events.iter().rev().take(n).collect();
+    if tail.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No events yet.",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    for e in tail.iter().rev() {
+        let ts = e.timestamp.format("%m-%d %H:%M:%S").to_string();
+        let action_str = e.action.to_string();
+        let mut spans = vec![
+            Span::styled(ts, Style::default().fg(Color::DarkGray)),
+            Span::raw("  "),
+            Span::styled(
+                format!("{:<9}", action_str),
+                Style::default()
+                    .fg(action_color(e.action))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+            Span::styled(e.issue_id.clone(), Style::default().fg(Color::Cyan)),
+        ];
+        if let Some(c) = e.changes.first() {
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(
+                format_field_change(c),
+                Style::default().fg(Color::DarkGray),
+            ));
+        } else if let Some(note) = &e.note {
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(note.clone(), Style::default().fg(Color::Gray)));
+        }
+        lines.push(Line::from(spans));
+    }
+    let title = if app.follow {
+        "Live tail  ● follow"
+    } else {
+        "Live tail"
+    };
+    let para = Paragraph::new(Text::from(lines)).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Blue))
+            .title(title),
+    );
+    f.render_widget(para, area);
 }

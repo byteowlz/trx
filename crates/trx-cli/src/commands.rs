@@ -3,8 +3,9 @@
 use anyhow::{Result, bail};
 use colored::Colorize;
 use trx_core::{
-    AgentCtx, DependencyType, Event, EventAction, EventLog, Issue, IssueGraph, IssueType, Status,
-    Store, diff_issue, enrich_issue, generate_id, id::generate_child_id,
+    AgentCtx, DependencyType, Event, EventAction, EventLog, Issue, IssueGraph, IssueType,
+    SessionSummary, Status, Store, diff_issue, enrich_issue, generate_id, id::generate_child_id,
+    summarize_sessions,
 };
 
 /// Append an event to `.trx/events.jsonl`. Failures are logged to stderr but
@@ -171,6 +172,44 @@ fn resolve_assignee(assignee: &str) -> String {
     }
 }
 
+#[derive(Clone, Copy)]
+enum SortKey {
+    Priority,
+    Created,
+    Updated,
+    Closed,
+    Id,
+    Status,
+}
+
+impl SortKey {
+    fn parse(s: &str) -> Result<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "priority" | "prio" | "p" => Ok(SortKey::Priority),
+            "created" | "created_at" | "date" | "age" => Ok(SortKey::Created),
+            "updated" | "updated_at" | "modified" => Ok(SortKey::Updated),
+            "closed" | "closed_at" => Ok(SortKey::Closed),
+            "id" => Ok(SortKey::Id),
+            "status" => Ok(SortKey::Status),
+            other => bail!(
+                "invalid --sort value '{}'. Expected: priority, created, updated, closed, id, status",
+                other
+            ),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            SortKey::Priority => "priority",
+            SortKey::Created => "created",
+            SortKey::Updated => "updated",
+            SortKey::Closed => "closed",
+            SortKey::Id => "id",
+            SortKey::Status => "status",
+        }
+    }
+}
+
 pub fn list(
     status: Option<String>,
     issue_type: Option<String>,
@@ -183,8 +222,11 @@ pub fn list(
     assignee: Option<String>,
     created_after: Option<String>,
     created_before: Option<String>,
+    sort: String,
+    reverse: bool,
     json: bool,
 ) -> Result<()> {
+    let sort_key = SortKey::parse(&sort)?;
     let store = Store::open()?;
 
     // Use list(false) to get all issues if:
@@ -291,12 +333,27 @@ pub fn list(
         issues.retain(|i| i.created_at <= before_dt);
     }
 
-    // Sort by priority, then by creation date
-    issues.sort_by(|a, b| {
-        a.priority
-            .cmp(&b.priority)
-            .then_with(|| b.created_at.cmp(&a.created_at))
-    });
+    // Sort by the requested key. Date sorts are newest-first by default; other
+    // sorts are ascending by default. `--reverse` flips whichever default applies.
+    match sort_key {
+        SortKey::Priority => issues.sort_by(|a, b| {
+            a.priority
+                .cmp(&b.priority)
+                .then_with(|| b.created_at.cmp(&a.created_at))
+        }),
+        SortKey::Created => issues.sort_by_key(|i| std::cmp::Reverse(i.created_at)),
+        SortKey::Updated => issues.sort_by_key(|i| std::cmp::Reverse(i.updated_at)),
+        SortKey::Closed => issues.sort_by_key(|i| std::cmp::Reverse(i.closed_at)),
+        SortKey::Id => issues.sort_by(|a, b| a.id.cmp(&b.id)),
+        SortKey::Status => issues.sort_by(|a, b| {
+            (a.status as u8)
+                .cmp(&(b.status as u8))
+                .then_with(|| b.created_at.cmp(&a.created_at))
+        }),
+    }
+    if reverse {
+        issues.reverse();
+    }
 
     // Apply limit
     if let Some(n) = limit {
@@ -367,6 +424,13 @@ pub fn list(
     } else if issues.is_empty() {
         println!("No issues found");
     } else {
+        let show_date = matches!(
+            sort_key,
+            SortKey::Created | SortKey::Updated | SortKey::Closed
+        );
+        if show_date {
+            eprintln!("Sorted by {}", sort_key.label());
+        }
         for issue in issues {
             let status_color = match issue.status {
                 Status::Open => "open".white(),
@@ -375,14 +439,35 @@ pub fn list(
                 Status::Closed => "closed".green(),
                 Status::Tombstone => "tombstone".dimmed(),
             };
-            println!(
-                "{} [P{}] [{}] {} - {}",
-                issue.id.cyan(),
-                issue.priority,
-                issue.issue_type.to_string().blue(),
-                status_color,
-                issue.title
-            );
+            if show_date {
+                let dt = match sort_key {
+                    SortKey::Created => Some(issue.created_at),
+                    SortKey::Updated => Some(issue.updated_at),
+                    SortKey::Closed => issue.closed_at,
+                    _ => None,
+                };
+                let date_str = dt
+                    .map(|d| d.format("%Y-%m-%d").to_string())
+                    .unwrap_or_else(|| "----------".into());
+                println!(
+                    "{} {} [P{}] [{}] {} - {}",
+                    date_str.dimmed(),
+                    issue.id.cyan(),
+                    issue.priority,
+                    issue.issue_type.to_string().blue(),
+                    status_color,
+                    issue.title
+                );
+            } else {
+                println!(
+                    "{} [P{}] [{}] {} - {}",
+                    issue.id.cyan(),
+                    issue.priority,
+                    issue.issue_type.to_string().blue(),
+                    status_color,
+                    issue.title
+                );
+            }
         }
     }
 
@@ -520,8 +605,7 @@ pub fn show(id: &str, json: bool) -> Result<()> {
         // Recent activity (best-effort: skip silently on read errors so we
         // never fail `show` because of a corrupt event log line).
         if let Ok(events) = EventLog::at(&store.trx_dir()).read_all() {
-            let mut for_issue: Vec<&Event> =
-                events.iter().filter(|e| e.issue_id == id).collect();
+            let mut for_issue: Vec<&Event> = events.iter().filter(|e| e.issue_id == id).collect();
             for_issue.sort_by_key(|e| std::cmp::Reverse(e.timestamp));
             for_issue.truncate(5);
             if !for_issue.is_empty() {
@@ -658,8 +742,7 @@ pub fn ready(
         .collect();
     let graph = IssueGraph::from_issues(&open_issues);
     let ready_all = graph.ready_issues(&open_issues);
-    let ready_ids: std::collections::HashSet<_> =
-        ready_all.iter().map(|i| i.id.as_str()).collect();
+    let ready_ids: std::collections::HashSet<_> = ready_all.iter().map(|i| i.id.as_str()).collect();
 
     // Partition open issues into ready vs. truly-blocked BEFORE filtering, so
     // a filter that hides a ready issue does not misclassify it as blocked.
@@ -824,7 +907,11 @@ pub fn dep_unblock(id: &str, by: &str, json: bool) -> Result<()> {
 
     let mut removed = Vec::new();
     for blocker_id in &blocker_ids {
-        if issue.dependencies.iter().any(|d| d.depends_on_id == *blocker_id) {
+        if issue
+            .dependencies
+            .iter()
+            .any(|d| d.depends_on_id == *blocker_id)
+        {
             removed.push(*blocker_id);
         }
         issue.remove_dependency(blocker_id);
@@ -2599,7 +2686,13 @@ pub fn history(id: &str, limit: Option<usize>, json: bool) -> Result<()> {
     } else if filtered.is_empty() {
         println!("No events for {}", id);
     } else {
-        println!("{} {} ({} event{})", "History:".bold(), id.cyan(), filtered.len(), if filtered.len() == 1 { "" } else { "s" });
+        println!(
+            "{} {} ({} event{})",
+            "History:".bold(),
+            id.cyan(),
+            filtered.len(),
+            if filtered.len() == 1 { "" } else { "s" }
+        );
         for e in &filtered {
             print_event_line(e);
         }
@@ -2623,7 +2716,10 @@ pub fn events(
     let all = log.read_all()?;
 
     let action_parsed = match action {
-        Some(s) => Some(s.parse::<EventAction>().map_err(|e| anyhow::anyhow!("{}", e))?),
+        Some(s) => Some(
+            s.parse::<EventAction>()
+                .map_err(|e| anyhow::anyhow!("{}", e))?,
+        ),
         None => None,
     };
     let since_parsed = match since {
@@ -2809,4 +2905,999 @@ fn render_issue_md(md: &mut String, issue: &Issue, store: &Store) {
         md.push_str(&format!("- {}\n", line));
     }
     md.push('\n');
+}
+
+// ============================================================================
+// Activity feed: trx log
+// ============================================================================
+
+/// Color an `EventAction` for terminal output. Kept consistent across `log`,
+/// `sessions <id>`, and `history` so the same action always looks the same.
+fn colored_action(a: EventAction) -> String {
+    let s = a.to_string();
+    match a {
+        EventAction::Created => s.green().to_string(),
+        EventAction::Closed => s.blue().to_string(),
+        EventAction::Reopened => s.yellow().to_string(),
+        EventAction::Deleted => s.red().to_string(),
+        EventAction::Restored => s.green().to_string(),
+        EventAction::DepAdded | EventAction::DepRemoved => s.magenta().to_string(),
+        EventAction::SessionLinked => s.cyan().to_string(),
+        EventAction::Updated => s.normal().to_string(),
+    }
+}
+
+/// Format a `FieldChange` as `field: from → to` (with `∅` for missing sides).
+fn format_change(c: &trx_core::FieldChange) -> String {
+    match (&c.from, &c.to) {
+        (Some(f), Some(t)) => format!("{}: {} → {}", c.field, f, t),
+        (None, Some(t)) => format!("{}: ∅ → {}", c.field, t),
+        (Some(f), None) => format!("{}: {} → ∅", c.field, f),
+        (None, None) => c.field.clone(),
+    }
+}
+
+/// One-line AGENT_CTX summary, e.g. `claude-code · my-session · opus-4.7`.
+/// Returns `None` when no context fields are populated.
+fn agent_ctx_line(e: &Event) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(h) = &e.harness {
+        parts.push(h.clone());
+    } else if let Some(p) = &e.platform {
+        parts.push(p.clone());
+    }
+    if let Some(n) = &e.session_name {
+        parts.push(n.clone());
+    }
+    if let Some(m) = &e.model {
+        parts.push(m.clone());
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" · "))
+    }
+}
+
+/// Verbose AGENT_CTX block: one labeled line per non-empty field.
+fn agent_ctx_verbose(e: &Event) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |label: &str, val: &Option<String>| {
+        if let Some(v) = val {
+            out.push(format!("{:<10} {}", format!("{}:", label), v));
+        }
+    };
+    push("user", &e.user_id);
+    push("platform", &e.platform);
+    push("harness", &e.harness);
+    push("session", &e.session_name);
+    push("plat_sid", &e.platform_session_id);
+    push("harn_sid", &e.harness_session_id);
+    push("workspace", &e.workspace_id);
+    push("model", &e.model);
+    push("request", &e.request_id);
+    push("correlate", &e.correlation_id);
+    out
+}
+
+/// Render one event in the `trx log` feed.
+fn render_log_event(e: &Event, verbose: bool) {
+    let ts = e.timestamp.format("%Y-%m-%d %H:%M:%S").to_string();
+    println!(
+        "  {}  {:<10} {}",
+        ts.dimmed(),
+        colored_action(e.action),
+        e.issue_id.cyan()
+    );
+    if let Some(note) = &e.note {
+        println!("    {} {}", "›".dimmed(), note);
+    }
+    for c in &e.changes {
+        println!("    {} {}", "·".dimmed(), format_change(c).dimmed());
+    }
+    if verbose {
+        for line in agent_ctx_verbose(e) {
+            println!("    {}", line.dimmed());
+        }
+    }
+}
+
+/// Print a session header (`── session: <id> · <user> · <harness> · <model> ──`).
+fn print_session_header(s: &SessionSummary) {
+    let mut parts: Vec<String> = Vec::new();
+    parts.push(s.session_id.clone());
+    if let Some(n) = &s.session_name
+        && Some(n.as_str()) != Some(s.session_id.as_str())
+    {
+        parts.push(n.clone());
+    }
+    if let Some(u) = &s.user_id {
+        parts.push(u.clone());
+    }
+    if let Some(h) = &s.harness {
+        parts.push(h.clone());
+    } else if let Some(p) = &s.platform {
+        parts.push(p.clone());
+    }
+    if let Some(m) = &s.model {
+        parts.push(m.clone());
+    }
+    let range = format!(
+        "{} → {}",
+        s.first_at.format("%Y-%m-%d %H:%M"),
+        s.last_at.format("%H:%M")
+    );
+    println!(
+        "{} {} {}  {} {} {}",
+        "──".dimmed(),
+        "session:".bold(),
+        parts.join(" · ").cyan(),
+        format!(
+            "({} event{})",
+            s.event_count,
+            if s.event_count == 1 { "" } else { "s" }
+        )
+        .dimmed(),
+        "·".dimmed(),
+        range.dimmed(),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn log(
+    issue: Option<String>,
+    session: Option<String>,
+    user: Option<String>,
+    action: Option<String>,
+    since: Option<String>,
+    until: Option<String>,
+    limit: Option<usize>,
+    no_group: bool,
+    verbose: bool,
+    json: bool,
+) -> Result<()> {
+    let store = Store::open()?;
+    let log = EventLog::at(&store.trx_dir());
+    let all = log.read_all()?;
+
+    let action_parsed = match action {
+        Some(s) => Some(
+            s.parse::<EventAction>()
+                .map_err(|e| anyhow::anyhow!("{}", e))?,
+        ),
+        None => None,
+    };
+    let since_parsed = match since {
+        Some(s) => Some(parse_date(&s)?),
+        None => None,
+    };
+    let until_parsed = match until {
+        Some(s) => Some(parse_date(&s)?),
+        None => None,
+    };
+
+    let filtered = filter_events(
+        all,
+        issue.as_deref(),
+        session.as_deref(),
+        user.as_deref(),
+        action_parsed,
+        since_parsed,
+        until_parsed,
+        limit,
+    );
+
+    if json {
+        println!("{}", serde_json::to_string(&filtered)?);
+        return Ok(());
+    }
+
+    if filtered.is_empty() {
+        println!("No events match");
+        return Ok(());
+    }
+
+    if no_group {
+        for e in &filtered {
+            render_log_event(e, verbose);
+        }
+        return Ok(());
+    }
+
+    // Group by session_key, preserving the filtered order (newest first).
+    // Within a session group, print events oldest → newest so the narrative
+    // reads forward in time.
+    let summaries = summarize_sessions(&filtered);
+    for s in &summaries {
+        print_session_header(s);
+        let mut session_events: Vec<&Event> = filtered
+            .iter()
+            .filter(|e| e.session_key().unwrap_or("-") == s.session_id)
+            .collect();
+        session_events.sort_by_key(|e| e.timestamp);
+        for e in session_events {
+            render_log_event(e, verbose);
+        }
+        println!();
+    }
+    Ok(())
+}
+
+// ============================================================================
+// Sessions: trx sessions [<id>]
+// ============================================================================
+
+#[allow(clippy::too_many_arguments)]
+pub fn sessions(
+    session: Option<String>,
+    user: Option<String>,
+    since: Option<String>,
+    until: Option<String>,
+    limit: Option<usize>,
+    verbose: bool,
+    json: bool,
+) -> Result<()> {
+    let store = Store::open()?;
+    let log = EventLog::at(&store.trx_dir());
+    let all = log.read_all()?;
+
+    let since_parsed = match since {
+        Some(s) => Some(parse_date(&s)?),
+        None => None,
+    };
+    let until_parsed = match until {
+        Some(s) => Some(parse_date(&s)?),
+        None => None,
+    };
+
+    // Drilldown: full trace for one session.
+    if let Some(sid) = session {
+        let events = filter_events(
+            all,
+            None,
+            Some(sid.as_str()),
+            user.as_deref(),
+            None,
+            since_parsed,
+            until_parsed,
+            None,
+        );
+        if json {
+            println!("{}", serde_json::to_string(&events)?);
+            return Ok(());
+        }
+        if events.is_empty() {
+            println!("No events for session: {}", sid);
+            return Ok(());
+        }
+        // Oldest → newest for narrative reading.
+        let mut sorted = events.clone();
+        sorted.sort_by_key(|e| e.timestamp);
+        let summaries = summarize_sessions(&sorted);
+        if let Some(s) = summaries.first() {
+            print_session_header(s);
+        }
+        for e in &sorted {
+            render_log_event(e, verbose);
+        }
+        return Ok(());
+    }
+
+    // List view: one row per session.
+    let events = filter_events(
+        all,
+        None,
+        None,
+        user.as_deref(),
+        None,
+        since_parsed,
+        until_parsed,
+        None,
+    );
+    let mut summaries = summarize_sessions(&events);
+    if let Some(n) = limit {
+        summaries.truncate(n);
+    }
+
+    if json {
+        println!("{}", serde_json::to_string(&summaries)?);
+        return Ok(());
+    }
+
+    if summaries.is_empty() {
+        println!("No sessions match");
+        return Ok(());
+    }
+
+    println!(
+        "{:<24} {:<12} {:<14} {:<22} {:>6}  {}",
+        "SESSION".bold(),
+        "USER".bold(),
+        "HARNESS".bold(),
+        "MODEL".bold(),
+        "EVTS".bold(),
+        "RANGE / ISSUES".bold(),
+    );
+    for s in &summaries {
+        let id = truncate(&s.session_id, 24);
+        let user = truncate(s.user_id.as_deref().unwrap_or("-"), 12);
+        let harness = truncate(
+            s.harness
+                .as_deref()
+                .or(s.platform.as_deref())
+                .unwrap_or("-"),
+            14,
+        );
+        let model = truncate(s.model.as_deref().unwrap_or("-"), 22);
+        let range = format!(
+            "{} → {}",
+            s.first_at.format("%Y-%m-%d %H:%M"),
+            s.last_at.format("%H:%M")
+        );
+        println!(
+            "{:<24} {:<12} {:<14} {:<22} {:>6}  {}",
+            id.cyan(),
+            user,
+            harness,
+            model,
+            s.event_count,
+            range.dimmed()
+        );
+        if !s.issue_ids.is_empty() {
+            let preview: Vec<String> = s.issue_ids.iter().take(5).cloned().collect();
+            let more = if s.issue_ids.len() > 5 {
+                format!(" (+{} more)", s.issue_ids.len() - 5)
+            } else {
+                String::new()
+            };
+            println!(
+                "{:<24} {}{}",
+                "",
+                preview.join(", ").dimmed(),
+                more.dimmed()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn truncate(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(n.saturating_sub(1)).collect();
+        out.push('…');
+        out
+    }
+}
+
+// ============================================================================
+// Stats: trx stats
+// ============================================================================
+
+pub fn stats(since: Option<String>, until: Option<String>, by: &str, json: bool) -> Result<()> {
+    let store = Store::open()?;
+    let log = EventLog::at(&store.trx_dir());
+    let all = log.read_all()?;
+
+    let since_dt = match since {
+        Some(s) => parse_date(&s)?,
+        None => chrono::Utc::now() - chrono::Duration::days(30),
+    };
+    let until_dt = match until {
+        Some(s) => Some(parse_date(&s)?),
+        None => None,
+    };
+
+    let events = filter_events(all, None, None, None, None, Some(since_dt), until_dt, None);
+
+    let bucket = by.to_ascii_lowercase();
+    if !matches!(bucket.as_str(), "day" | "hour") {
+        bail!("--by must be 'day' or 'hour'");
+    }
+
+    // Bucketed counts for the sparkline.
+    let (labels, counts) = bucket_counts(&events, &bucket, since_dt, until_dt);
+
+    // Aggregate breakdowns.
+    let mut by_action: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    let mut by_user: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut by_harness: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    let mut sessions_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for e in &events {
+        *by_action.entry(e.action.to_string()).or_default() += 1;
+        *by_user
+            .entry(e.user_id.clone().unwrap_or_else(|| "-".into()))
+            .or_default() += 1;
+        *by_harness
+            .entry(
+                e.harness
+                    .clone()
+                    .or_else(|| e.platform.clone())
+                    .unwrap_or_else(|| "-".into()),
+            )
+            .or_default() += 1;
+        if let Some(k) = e.session_key() {
+            sessions_set.insert(k.to_string());
+        }
+    }
+
+    if json {
+        let payload = serde_json::json!({
+            "total": events.len(),
+            "since": since_dt,
+            "until": until_dt,
+            "by": bucket,
+            "buckets": labels.iter().zip(counts.iter()).map(|(l, c)| {
+                serde_json::json!({"label": l, "count": c})
+            }).collect::<Vec<_>>(),
+            "by_action": by_action,
+            "by_user": by_user,
+            "by_harness": by_harness,
+            "sessions": sessions_set.len(),
+        });
+        println!("{}", serde_json::to_string(&payload)?);
+        return Ok(());
+    }
+
+    let header = match until_dt {
+        Some(u) => format!(
+            "Events: {} ({} → {})",
+            events.len(),
+            since_dt.format("%Y-%m-%d"),
+            u.format("%Y-%m-%d")
+        ),
+        None => format!(
+            "Events: {} (since {})",
+            events.len(),
+            since_dt.format("%Y-%m-%d")
+        ),
+    };
+    println!("{}", header.bold());
+    println!("Sessions: {}", sessions_set.len());
+
+    if !counts.is_empty() {
+        println!();
+        println!("{} (per {}):", "Activity".bold(), bucket);
+        let max = *counts.iter().max().unwrap_or(&0);
+        let spark = sparkline(&counts);
+        println!("  {}", spark);
+        // Show start and end labels under the sparkline.
+        if let (Some(first), Some(last)) = (labels.first(), labels.last()) {
+            let pad = spark.chars().count().saturating_sub(last.len());
+            println!("  {}{}{}", first, " ".repeat(pad), last);
+        }
+        println!("  {} {}", "peak:".dimmed(), max);
+    }
+
+    print_bar_breakdown("By action", &by_action);
+    print_bar_breakdown("By user", &by_user);
+    print_bar_breakdown("By harness", &by_harness);
+
+    Ok(())
+}
+
+/// Compute (labels, counts) buckets between `since` and `until` (or now).
+/// Empty intermediate buckets are kept so the sparkline shows lulls.
+fn bucket_counts(
+    events: &[Event],
+    bucket: &str,
+    since: chrono::DateTime<chrono::Utc>,
+    until: Option<chrono::DateTime<chrono::Utc>>,
+) -> (Vec<String>, Vec<usize>) {
+    let end = until.unwrap_or_else(chrono::Utc::now);
+    if end < since {
+        return (Vec::new(), Vec::new());
+    }
+    let (step, fmt): (chrono::Duration, &str) = match bucket {
+        "hour" => (chrono::Duration::hours(1), "%m-%d %H"),
+        _ => (chrono::Duration::days(1), "%m-%d"),
+    };
+
+    // Truncate `since` to the start of its bucket.
+    let start = if bucket == "hour" {
+        since
+            .date_naive()
+            .and_hms_opt(since.time().hour(), 0, 0)
+            .map(|d| chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(d, chrono::Utc))
+            .unwrap_or(since)
+    } else {
+        since
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .map(|d| chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(d, chrono::Utc))
+            .unwrap_or(since)
+    };
+
+    let mut labels: Vec<String> = Vec::new();
+    let mut counts: Vec<usize> = Vec::new();
+    let mut cursor = start;
+    // Cap at a reasonable bucket count to keep output sane.
+    let max_buckets = 400;
+    while cursor <= end && labels.len() < max_buckets {
+        labels.push(cursor.format(fmt).to_string());
+        counts.push(0);
+        cursor += step;
+    }
+    if labels.is_empty() {
+        return (labels, counts);
+    }
+    for ev in events {
+        if ev.timestamp < start || ev.timestamp > end {
+            continue;
+        }
+        let idx_signed = (ev.timestamp - start).num_seconds() / step.num_seconds();
+        let idx = idx_signed as usize;
+        if idx < counts.len() {
+            counts[idx] += 1;
+        }
+    }
+    (labels, counts)
+}
+
+const SPARK_CHARS: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+fn sparkline(counts: &[usize]) -> String {
+    if counts.is_empty() {
+        return String::new();
+    }
+    let max = *counts.iter().max().unwrap_or(&0);
+    if max == 0 {
+        return " ".repeat(counts.len());
+    }
+    counts
+        .iter()
+        .map(|&c| {
+            if c == 0 {
+                ' '
+            } else {
+                let idx = (c * (SPARK_CHARS.len() - 1)) / max;
+                SPARK_CHARS[idx]
+            }
+        })
+        .collect()
+}
+
+use chrono::Timelike;
+
+fn print_bar_breakdown(title: &str, map: &std::collections::BTreeMap<String, usize>) {
+    if map.is_empty() {
+        return;
+    }
+    println!();
+    println!("{}:", title.bold());
+    let max = *map.values().max().unwrap_or(&0).max(&1);
+    // Sort descending by count.
+    let mut rows: Vec<(&String, &usize)> = map.iter().collect();
+    rows.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+    let label_w = rows.iter().map(|(k, _)| k.len()).max().unwrap_or(0).min(20);
+    for (k, v) in rows.iter().take(10) {
+        let bar_len = (*v * 24) / max.max(1);
+        let bar = "█".repeat(bar_len);
+        println!(
+            "  {:<width$}  {:>4}  {}",
+            truncate(k, label_w),
+            v,
+            bar.cyan(),
+            width = label_w
+        );
+    }
+}
+
+// ============================================================================
+// Calendar heatmap: trx heatmap
+// ============================================================================
+
+/// Map an event count to a 2-column-wide colored cell ("glyph " pattern).
+fn heatmap_cell(count: usize) -> String {
+    match count {
+        0 => "·".dimmed().to_string(),
+        1..=2 => "▒".green().to_string(),
+        3..=5 => "▓".bright_green().to_string(),
+        _ => "█".bright_cyan().to_string(),
+    }
+}
+
+pub fn heatmap(
+    since: Option<String>,
+    weeks: usize,
+    user: Option<String>,
+    json: bool,
+) -> Result<()> {
+    use chrono::{Datelike, Duration, NaiveDate};
+
+    if weeks == 0 || weeks > 104 {
+        bail!("--weeks must be between 1 and 104");
+    }
+    let store = Store::open()?;
+    let log = EventLog::at(&store.trx_dir());
+    let all = log.read_all()?;
+
+    let since_dt = match since {
+        Some(s) => parse_date(&s)?,
+        None => chrono::Utc::now() - Duration::weeks(weeks as i64),
+    };
+
+    let events = filter_events(
+        all,
+        None,
+        None,
+        user.as_deref(),
+        None,
+        Some(since_dt),
+        None,
+        None,
+    );
+
+    // Bucket by local date.
+    let today: NaiveDate = chrono::Local::now().date_naive();
+    let weekday_today = today.weekday().num_days_from_monday() as i64;
+    let last_col_monday = today - Duration::days(weekday_today);
+    let first_col_monday = last_col_monday - Duration::weeks((weeks as i64) - 1);
+
+    let mut counts: std::collections::BTreeMap<NaiveDate, usize> =
+        std::collections::BTreeMap::new();
+    for e in &events {
+        let d = e.timestamp.date_naive();
+        if d < first_col_monday {
+            continue;
+        }
+        *counts.entry(d).or_default() += 1;
+    }
+
+    if json {
+        let payload = serde_json::json!({
+            "since": first_col_monday,
+            "until": today,
+            "weeks": weeks,
+            "days": counts.iter().map(|(d, c)| serde_json::json!({
+                "date": d.to_string(),
+                "count": c,
+            })).collect::<Vec<_>>(),
+            "total": events.len(),
+        });
+        println!("{}", serde_json::to_string(&payload)?);
+        return Ok(());
+    }
+
+    let total: usize = counts.values().sum();
+    let active_days = counts.values().filter(|c| **c > 0).count();
+    let sessions: std::collections::BTreeSet<String> = events
+        .iter()
+        .filter_map(|e| e.session_key().map(String::from))
+        .collect();
+
+    println!(
+        "{} {}",
+        "Activity heatmap".bold(),
+        format!("(last {} weeks · {} → {})", weeks, first_col_monday, today).dimmed()
+    );
+    println!();
+
+    // Month labels above the grid. One label per month-start column.
+    let mut month_line = String::from("      ");
+    let mut last_month = 0u32;
+    for w in 0..weeks {
+        let col_monday = first_col_monday + Duration::weeks(w as i64);
+        if col_monday.month() != last_month && col_monday.day() <= 7 {
+            let label = col_monday.format("%b").to_string();
+            // Each cell is 2 cols wide; pad label to a multiple of 2.
+            let label_padded = if label.len().is_multiple_of(2) {
+                label
+            } else {
+                format!("{} ", label)
+            };
+            month_line.push_str(&label_padded);
+            last_month = col_monday.month();
+        } else {
+            month_line.push_str("  ");
+        }
+    }
+    println!("{}", month_line.dimmed());
+
+    let weekday_labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+    for (row, label) in weekday_labels.iter().enumerate() {
+        let mut line = format!("{:<6}", label);
+        for w in 0..weeks {
+            let date = first_col_monday + Duration::weeks(w as i64) + Duration::days(row as i64);
+            if date > today {
+                line.push_str("  ");
+                continue;
+            }
+            let c = *counts.get(&date).unwrap_or(&0);
+            line.push_str(&heatmap_cell(c));
+            line.push(' ');
+        }
+        println!("{}", line);
+    }
+    println!();
+    println!(
+        "Legend  {} 0   {} 1–2   {} 3–5   {} 6+",
+        "·".dimmed(),
+        "▒".green(),
+        "▓".bright_green(),
+        "█".bright_cyan()
+    );
+    println!();
+    println!(
+        "{} events  ·  {} active day{}  ·  {} session{}",
+        total,
+        active_days,
+        if active_days == 1 { "" } else { "s" },
+        sessions.len(),
+        if sessions.len() == 1 { "" } else { "s" }
+    );
+    Ok(())
+}
+
+// ============================================================================
+// Swimlane: trx swimlane
+// ============================================================================
+
+fn action_priority(a: EventAction) -> u8 {
+    match a {
+        EventAction::Deleted => 6,
+        EventAction::Closed => 5,
+        EventAction::Reopened => 4,
+        EventAction::Created => 3,
+        EventAction::DepAdded | EventAction::DepRemoved => 2,
+        EventAction::SessionLinked | EventAction::Restored => 1,
+        EventAction::Updated => 0,
+    }
+}
+
+fn action_glyph(a: EventAction) -> &'static str {
+    match a {
+        EventAction::Created => "+",
+        EventAction::Updated => "*",
+        EventAction::Reopened => "↑",
+        EventAction::Closed => "■",
+        EventAction::Deleted => "✕",
+        EventAction::Restored => "↻",
+        EventAction::DepAdded | EventAction::DepRemoved => "◆",
+        EventAction::SessionLinked => "·",
+    }
+}
+
+fn colored_glyph(a: EventAction) -> String {
+    let g = action_glyph(a);
+    match a {
+        EventAction::Created => g.green().to_string(),
+        EventAction::Updated => g.white().to_string(),
+        EventAction::Reopened => g.yellow().to_string(),
+        EventAction::Closed => g.bright_blue().to_string(),
+        EventAction::Deleted => g.bright_red().to_string(),
+        EventAction::Restored => g.green().to_string(),
+        EventAction::DepAdded | EventAction::DepRemoved => g.magenta().to_string(),
+        EventAction::SessionLinked => g.cyan().to_string(),
+    }
+}
+
+/// Best-effort terminal width via `stty size`. Returns `default` when stty
+/// isn't available (e.g. piped output) — that's fine for our use case.
+fn term_width(default: usize) -> usize {
+    let out = std::process::Command::new("stty")
+        .arg("size")
+        .stdin(std::process::Stdio::inherit())
+        .output()
+        .ok();
+    let Some(out) = out else { return default };
+    if !out.status.success() {
+        return default;
+    }
+    let s = String::from_utf8_lossy(&out.stdout);
+    let mut it = s.split_whitespace();
+    let _rows: Option<u16> = it.next().and_then(|s| s.parse().ok());
+    let cols: Option<u16> = it.next().and_then(|s| s.parse().ok());
+    cols.map(|c| c as usize).unwrap_or(default)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn swimlane(
+    since: Option<String>,
+    until: Option<String>,
+    cols: Option<usize>,
+    limit: usize,
+    session: Option<String>,
+    user: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let store = Store::open()?;
+    let log = EventLog::at(&store.trx_dir());
+    let all = log.read_all()?;
+
+    let since_dt = match since {
+        Some(s) => parse_date(&s)?,
+        None => chrono::Utc::now() - chrono::Duration::days(30),
+    };
+    let until_dt = match until {
+        Some(s) => parse_date(&s)?,
+        None => chrono::Utc::now(),
+    };
+    if until_dt <= since_dt {
+        bail!("--until must be after --since");
+    }
+
+    let events = filter_events(
+        all,
+        None,
+        session.as_deref(),
+        user.as_deref(),
+        None,
+        Some(since_dt),
+        Some(until_dt),
+        None,
+    );
+
+    if events.is_empty() {
+        println!("No events in window");
+        return Ok(());
+    }
+
+    // Pick issues, ordered by most-recent activity.
+    let mut last_seen: std::collections::HashMap<String, chrono::DateTime<chrono::Utc>> =
+        std::collections::HashMap::new();
+    for e in &events {
+        last_seen
+            .entry(e.issue_id.clone())
+            .and_modify(|t| {
+                if e.timestamp > *t {
+                    *t = e.timestamp;
+                }
+            })
+            .or_insert(e.timestamp);
+    }
+    let mut issues: Vec<(String, chrono::DateTime<chrono::Utc>)> = last_seen.into_iter().collect();
+    issues.sort_by_key(|(_, ts)| std::cmp::Reverse(*ts));
+    issues.truncate(limit);
+    let issue_ids: Vec<String> = issues.iter().map(|(i, _)| i.clone()).collect();
+
+    let label_w = issue_ids
+        .iter()
+        .map(|s| s.chars().count())
+        .max()
+        .unwrap_or(8)
+        .clamp(8, 20);
+    let auto_cols = term_width(120).saturating_sub(label_w + 4).max(20);
+    let n_cols = cols.unwrap_or(auto_cols).clamp(10, 200);
+
+    let bucket_seconds = (until_dt - since_dt).num_seconds().max(1) as f64 / n_cols as f64;
+    let mut grid: Vec<Vec<Option<EventAction>>> = vec![vec![None; n_cols]; issue_ids.len()];
+    let issue_idx: std::collections::HashMap<&str, usize> = issue_ids
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.as_str(), i))
+        .collect();
+
+    for e in &events {
+        let Some(&row) = issue_idx.get(e.issue_id.as_str()) else {
+            continue;
+        };
+        let offset = (e.timestamp - since_dt).num_seconds() as f64;
+        let mut col = (offset / bucket_seconds).floor() as isize;
+        if col < 0 {
+            col = 0;
+        }
+        if (col as usize) >= n_cols {
+            col = (n_cols - 1) as isize;
+        }
+        let col = col as usize;
+        let cell = &mut grid[row][col];
+        match cell {
+            None => *cell = Some(e.action),
+            Some(existing) => {
+                if action_priority(e.action) > action_priority(*existing) {
+                    *existing = e.action;
+                }
+            }
+        }
+    }
+
+    if json {
+        let payload = serde_json::json!({
+            "since": since_dt,
+            "until": until_dt,
+            "cols": n_cols,
+            "issues": issue_ids,
+            "grid": grid.iter().map(|row| {
+                row.iter().map(|c| c.map(|a| a.to_string())).collect::<Vec<_>>()
+            }).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string(&payload)?);
+        return Ok(());
+    }
+
+    // Time axis: 4-6 evenly spaced %m-%d labels under the grid header.
+    let total_secs = (until_dt - since_dt).num_seconds() as f64;
+    let n_labels = ((n_cols / 12).clamp(2, 6)).min(n_cols);
+    let label_prefix = " ".repeat(label_w + 2);
+    let mut axis = label_prefix.clone();
+    let mut ticks = label_prefix.clone();
+    let line_max = label_w + 2 + n_cols;
+    for k in 0..n_labels {
+        let frac = if n_labels == 1 {
+            0.0
+        } else {
+            k as f64 / (n_labels - 1) as f64
+        };
+        let secs = since_dt + chrono::Duration::seconds((total_secs * frac) as i64);
+        let label = secs.format("%m-%d").to_string();
+        let col = (frac * (n_cols - 1) as f64).round() as usize;
+        let tick_target = label_w + 2 + col;
+        // Anchor the label so it fits before the right edge — last labels are
+        // pulled left so they don't overrun the grid.
+        let mut label_start = tick_target;
+        if label_start + label.len() > line_max {
+            label_start = line_max.saturating_sub(label.len());
+        }
+        // Don't overlap a previously-written label.
+        if label_start < axis.chars().count() {
+            label_start = axis.chars().count();
+        }
+        while axis.chars().count() < label_start {
+            axis.push(' ');
+        }
+        for ch in label.chars() {
+            if axis.chars().count() < line_max {
+                axis.push(ch);
+            }
+        }
+        while ticks.chars().count() < tick_target {
+            ticks.push(' ');
+        }
+        if ticks.chars().count() < line_max {
+            ticks.push('│');
+        }
+    }
+
+    println!(
+        "{} {}",
+        "Swimlane".bold(),
+        format!(
+            "({} → {}  ·  {} issue{}  ·  {} col{})",
+            since_dt.format("%Y-%m-%d %H:%M"),
+            until_dt.format("%Y-%m-%d %H:%M"),
+            issue_ids.len(),
+            if issue_ids.len() == 1 { "" } else { "s" },
+            n_cols,
+            if n_cols == 1 { "" } else { "s" }
+        )
+        .dimmed()
+    );
+    println!();
+    println!("{}", axis.dimmed());
+    println!("{}", ticks.dimmed());
+
+    for (row_idx, issue_id) in issue_ids.iter().enumerate() {
+        let trunc = truncate(issue_id, label_w);
+        let pad_n = label_w.saturating_sub(trunc.chars().count());
+        let mut line = String::new();
+        line.push_str(&trunc.cyan().to_string());
+        for _ in 0..pad_n {
+            line.push(' ');
+        }
+        line.push_str("  ");
+        for cell in &grid[row_idx] {
+            match cell {
+                Some(a) => line.push_str(&colored_glyph(*a)),
+                None => line.push_str(&"·".dimmed().to_string()),
+            }
+        }
+        println!("{}", line);
+    }
+
+    println!();
+    println!(
+        "Legend  {} created   {} updated   {} reopened   {} closed   {} deleted   {} dep",
+        "+".green(),
+        "*".white(),
+        "↑".yellow(),
+        "■".bright_blue(),
+        "✕".bright_red(),
+        "◆".magenta()
+    );
+
+    Ok(())
 }

@@ -231,9 +231,6 @@ mod tests {
             harness_session_id: Some("h".into()),
             ..Default::default()
         };
-        assert_eq!(
-            ctx.session_ids(),
-            vec!["p".to_string(), "h".to_string()]
-        );
+        assert_eq!(ctx.session_ids(), vec!["p".to_string(), "h".to_string()]);
     }
 }

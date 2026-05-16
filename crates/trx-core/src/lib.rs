@@ -18,7 +18,10 @@ pub mod store;
 pub use agent_ctx::AgentCtx;
 pub use config::Config;
 pub use error::Error;
-pub use events::{diff_issue, enrich_issue, Event, EventAction, EventLog, FieldChange};
+pub use events::{
+    Event, EventAction, EventLog, FieldChange, SessionSummary, diff_issue, enrich_issue,
+    summarize_sessions,
+};
 pub use graph::IssueGraph;
 pub use id::generate_id;
 pub use issue::{Dependency, DependencyType, Issue, IssueType, Status};

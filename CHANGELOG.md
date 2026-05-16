@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## [0.6.0] - 2026-05-16
+
+### Added
+
+- `trx list --sort <field>` and `--reverse` flags to control output order.
+  Accepted fields: `priority` (default), `created`, `updated`, `closed`,
+  `id`, `status`. Date sorts default to newest-first and prepend the
+  matching date column to each line.
+- `trx log`: chronological activity feed across all events, grouped by
+  session (platform/harness session id), with action-colored bullets,
+  indented field diffs, and a compact `[harness · session · model]`
+  AGENT_CTX line. Flags: `--issue`, `--session`, `--user`, `--action`,
+  `--since`, `--until`, `--limit`, `--no-group` (flat output),
+  `-v/--verbose` (expanded AGENT_CTX block per event), `--json`.
+  (trx-3e6q.1)
+- `trx sessions`: one row per distinct session id with user, harness,
+  model, event count, time range, and the issues touched. Pass a session
+  id to drill into that session's full trace. Flags: `--user`, `--since`,
+  `--until`, `--limit`, `-v/--verbose`, `--json`. (trx-3e6q.2)
+- `trx stats`: aggregate activity over a window (default last 30 days),
+  with a Unicode-block sparkline by day or hour and ranked bar charts by
+  action / user / harness. Flags: `--since`, `--until`, `--by day|hour`,
+  `--json`. (trx-3e6q.3)
+- `trx-core` now exposes `SessionSummary` and `summarize_sessions()` for
+  embedders that want the same grouping logic.
+- TUI: per-issue **Activity pane** (`T` toggles right pane between Issue
+  details and Activity). Shows event timeline with action-colored
+  actions, notes, field diffs, and a compact AGENT_CTX footer. Press `v`
+  to expand the AGENT_CTX block (user, platform, harness, session,
+  workspace, model, request, correlation). (trx-3e6q.4)
+- TUI: **Sessions view** (`S` toggles middle pane between Issues and
+  Sessions). Each row shows session id, event count, user / harness /
+  model, and time range. Drilling into a session populates the right
+  pane with its full event trace. (trx-3e6q.5)
+- TUI: **Follow mode** (`F` toggles). When on, the TUI re-reads
+  `.trx/events.jsonl` every ~2s so newly emitted events appear live;
+  pane titles and the status bar show a `● follow` indicator.
+  (trx-3e6q.6)
+- `trx heatmap`: GitHub-style calendar heatmap of event activity
+  (Mon-anchored rows × week columns) with Unicode block intensity
+  cells. Flags: `--weeks` (default 13), `--since`, `--until`, `--json`.
+  (trx-bhrt)
+- `trx swimlane`: issue × time grid showing each issue's event timeline
+  as a row of action glyphs (`+` created, `*` updated, `↑` reopened,
+  `■` closed, `✕` deleted, `◆` dep, `·` other). Auto-sized to the
+  terminal; `--limit` caps the number of issues, `--cols` overrides
+  width. Flags: `--since`, `--until`, `--limit`, `--cols`. (trx-bhrt)
+- TUI: **Dashboard mode** (`D` toggles). Full-screen visual summary
+  combining a 13-week activity heatmap, ranked action/user bar charts,
+  a top-sessions panel, and a live event tail. Honors `F` for follow
+  mode; `Esc` / `D` / `q` exits back to normal mode. (trx-bhrt)
+
 ## [0.5.1] - 2026-05-08
 
 ### Added

@@ -156,6 +156,94 @@ impl Event {
         self.platform_session_id.as_deref() == Some(session_id)
             || self.harness_session_id.as_deref() == Some(session_id)
     }
+
+    /// Key used to group events into "sessions" for visualization. Prefers
+    /// platform session id, then harness session id; returns `None` when the
+    /// event has neither (in which case callers typically render the event
+    /// under an "unattributed" bucket).
+    pub fn session_key(&self) -> Option<&str> {
+        self.platform_session_id
+            .as_deref()
+            .or(self.harness_session_id.as_deref())
+    }
+}
+
+/// Aggregated view of one session derived from the event log.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSummary {
+    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub first_at: DateTime<Utc>,
+    pub last_at: DateTime<Utc>,
+    pub event_count: usize,
+    /// Issue ids touched by this session, in first-seen order.
+    pub issue_ids: Vec<String>,
+}
+
+/// Group `events` by session key (platform_session_id, falling back to
+/// harness_session_id) and produce one summary per session. Events with no
+/// session id are bucketed under `"-"`. Sessions are returned sorted by their
+/// most-recent activity (newest first).
+pub fn summarize_sessions(events: &[Event]) -> Vec<SessionSummary> {
+    use std::collections::BTreeMap;
+
+    let mut buckets: BTreeMap<String, SessionSummary> = BTreeMap::new();
+    for ev in events {
+        let key = ev.session_key().unwrap_or("-").to_string();
+        let entry = buckets
+            .entry(key.clone())
+            .or_insert_with(|| SessionSummary {
+                session_id: key.clone(),
+                session_name: ev.session_name.clone(),
+                user_id: ev.user_id.clone(),
+                harness: ev.harness.clone(),
+                platform: ev.platform.clone(),
+                model: ev.model.clone(),
+                first_at: ev.timestamp,
+                last_at: ev.timestamp,
+                event_count: 0,
+                issue_ids: Vec::new(),
+            });
+        // Fill any field that was missing earlier — later events may carry it.
+        if entry.session_name.is_none() {
+            entry.session_name = ev.session_name.clone();
+        }
+        if entry.user_id.is_none() {
+            entry.user_id = ev.user_id.clone();
+        }
+        if entry.harness.is_none() {
+            entry.harness = ev.harness.clone();
+        }
+        if entry.platform.is_none() {
+            entry.platform = ev.platform.clone();
+        }
+        if entry.model.is_none() {
+            entry.model = ev.model.clone();
+        }
+        if ev.timestamp < entry.first_at {
+            entry.first_at = ev.timestamp;
+        }
+        if ev.timestamp > entry.last_at {
+            entry.last_at = ev.timestamp;
+        }
+        entry.event_count += 1;
+        if !entry.issue_ids.iter().any(|i| i == &ev.issue_id) {
+            entry.issue_ids.push(ev.issue_id.clone());
+        }
+    }
+
+    let mut out: Vec<SessionSummary> = buckets.into_values().collect();
+    out.sort_by_key(|s| std::cmp::Reverse(s.last_at));
+    out
 }
 
 /// Compute the diff between `before` and `after` for the user-mutable fields
@@ -314,8 +402,8 @@ mod tests {
 
         let event = Event::new("trx-abc1", EventAction::Created, &ctx("u1", "s1"));
         log.append(&event).unwrap();
-        let event2 = Event::new("trx-abc1", EventAction::Closed, &ctx("u1", "s1"))
-            .with_note("done");
+        let event2 =
+            Event::new("trx-abc1", EventAction::Closed, &ctx("u1", "s1")).with_note("done");
         log.append(&event2).unwrap();
 
         let read = log.read_all().unwrap();
@@ -394,6 +482,48 @@ mod tests {
         };
         enrich_issue(&mut issue, &ctx);
         assert_eq!(issue.created_by.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn summarize_sessions_groups_and_orders_by_recency() {
+        let mut e1 = Event::new("trx-1", EventAction::Created, &ctx("u", "s_old"));
+        e1.timestamp = chrono::DateTime::parse_from_rfc3339("2026-01-01T10:00:00Z")
+            .unwrap()
+            .into();
+        let mut e2 = Event::new("trx-2", EventAction::Updated, &ctx("u", "s_old"));
+        e2.timestamp = chrono::DateTime::parse_from_rfc3339("2026-01-01T11:00:00Z")
+            .unwrap()
+            .into();
+        let mut e3 = Event::new("trx-3", EventAction::Closed, &ctx("u", "s_new"));
+        e3.timestamp = chrono::DateTime::parse_from_rfc3339("2026-02-01T09:00:00Z")
+            .unwrap()
+            .into();
+
+        let summary = summarize_sessions(&[e1, e2, e3]);
+        assert_eq!(summary.len(), 2);
+        // Newest-first ordering.
+        assert_eq!(summary[0].session_id, "s_new");
+        assert_eq!(summary[1].session_id, "s_old");
+
+        let old = &summary[1];
+        assert_eq!(old.event_count, 2);
+        assert_eq!(old.issue_ids, vec!["trx-1", "trx-2"]);
+        assert_eq!(
+            old.first_at.format("%Y-%m-%d %H:%M").to_string(),
+            "2026-01-01 10:00"
+        );
+        assert_eq!(
+            old.last_at.format("%Y-%m-%d %H:%M").to_string(),
+            "2026-01-01 11:00"
+        );
+    }
+
+    #[test]
+    fn summarize_sessions_uses_dash_for_missing_session() {
+        let ev = Event::new("trx-1", EventAction::Created, &AgentCtx::default());
+        let summary = summarize_sessions(&[ev]);
+        assert_eq!(summary.len(), 1);
+        assert_eq!(summary[0].session_id, "-");
     }
 
     #[test]
