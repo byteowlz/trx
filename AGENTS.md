@@ -175,6 +175,7 @@ struct Cli {
 ```bash
 trx ready              # Show unblocked issues
 trx create "Title" -t task -p 2   # Create issue (types: bug/feature/task/epic/chore, priority: 0-4)
+trx list --epic <epic-id>          # Show an epic and all descendants/children
 trx update <id> --status in_progress
 trx close <id> -r "Done"
 trx sync               # Commit .trx/ changes
