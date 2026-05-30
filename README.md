@@ -37,7 +37,7 @@ cargo build --release
 
 - Minimal footprint with ~20 fields per issue
 - Git-native: all data tracked in version control
-- Conflict-free merging with CRDT support (automerge)
+- Simple JSONL storage with transparent legacy migration support
 - Easy to understand and extend
 
 ## Architecture
@@ -51,39 +51,18 @@ trx/
 └── .trx/             # Per-repo issue storage
     ├── config.toml   # Repo configuration
     ├── ISSUES.md     # Human-readable issue summary (auto-generated)
-    ├── issues.jsonl  # V1: All issues, one per line
-    └── crdt/         # V2: One .automerge file per issue
+    └── issues.jsonl  # Canonical store: all issues, one per line
 ```
 
-## Storage Versions
+## Storage
 
-trx supports two storage backends:
+trx uses a single canonical JSONL store:
 
-**V1 (JSONL)**: Simple, human-readable format. All issues stored in a single `issues.jsonl` file. Good for small projects or when human readability is prioritized.
+- `.trx/issues.jsonl` is the source of truth
+- Git tracks normal text diffs/merges
+- No active CRDT write path
 
-**V2 (CRDT)**: Each issue stored as a separate `.automerge` file. Enables conflict-free merging when multiple users edit issues concurrently. Recommended for teams.
-
-### Why CRDT?
-
-With JSONL, concurrent edits to different issues can still cause merge conflicts because they modify the same file. CRDT storage solves this:
-
-- Each issue is an independent automerge document
-- Concurrent edits to the same issue merge automatically
-- No manual conflict resolution needed
-- Git treats `.automerge` files as binary, automerge handles the merge semantics
-
-### Migration
-
-```bash
-# Check current storage version
-trx migrate --status
-
-# Upgrade v1 -> v2 (CRDT)
-trx migrate
-
-# Rollback v2 -> v1 (preserves crdt/ directory for safety)
-trx migrate --rollback
-```
+Legacy note: if an old `.trx/crdt/*.automerge` layout is detected, trx loads it for compatibility and transparently materializes JSONL on the next mutation.
 
 ## Data Model
 
@@ -144,14 +123,8 @@ trx supports importing from beads and uses a compatible JSONL format:
 
 ## Conflict Resolution
 
-With V2 (CRDT) storage, conflicts are resolved automatically during `trx sync`:
-
-```bash
-# After a git pull with conflicts
-trx sync  # Automatically merges any conflicting .automerge files
-```
-
-If git creates conflict marker files (`.BASE`, `.LOCAL`, `.REMOTE`), trx detects and merges them using automerge's built-in conflict resolution.
+trx relies on normal git text merge behavior for `.trx/issues.jsonl`.
+If merge conflicts occur, resolve them in the JSONL file and run `trx sync`.
 
 ## Development
 
