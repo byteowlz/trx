@@ -8,13 +8,18 @@
 
 use crate::{Error, Issue, Result, legacy_crdt};
 use std::collections::HashMap;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::PathBuf;
+use std::thread;
+use std::time::{Duration, Instant};
 
 const TRX_DIR: &str = ".trx";
 const ISSUES_FILE: &str = "issues.jsonl";
+const LOCK_FILE: &str = "issues.lock";
 const CONFIG_FILE: &str = "config.toml";
+const LOCK_TIMEOUT: Duration = Duration::from_secs(10);
+const LOCK_RETRY_DELAY: Duration = Duration::from_millis(25);
 const LEGACY_CRDT_DIR: &str = "crdt";
 const LEGACY_ISSUES_MD: &str = "ISSUES.md";
 
@@ -104,6 +109,8 @@ prefix = "{}"
     }
 
     fn load(&mut self) -> Result<()> {
+        self.issues.clear();
+        self.migrate_pending = false;
         let trx_dir = self.trx_dir();
         let crdt_dir = trx_dir.join(LEGACY_CRDT_DIR);
 
@@ -140,6 +147,11 @@ prefix = "{}"
     /// save after a legacy migration, also removes the `crdt/` directory and
     /// the derived `ISSUES.md` artifact.
     pub fn save(&mut self) -> Result<()> {
+        let _lock = self.acquire_lock()?;
+        self.save_locked()
+    }
+
+    fn save_locked(&mut self) -> Result<()> {
         let path = self.issues_path();
         let tmp = path.with_extension("jsonl.tmp");
 
@@ -174,6 +186,10 @@ prefix = "{}"
         Ok(())
     }
 
+    fn acquire_lock(&self) -> Result<StoreLock> {
+        StoreLock::acquire(self.trx_dir().join(LOCK_FILE))
+    }
+
     pub fn get(&self, id: &str) -> Option<&Issue> {
         self.issues.get(id)
     }
@@ -183,28 +199,34 @@ prefix = "{}"
     }
 
     pub fn create(&mut self, issue: Issue) -> Result<()> {
+        let _lock = self.acquire_lock()?;
+        self.load()?;
         if self.issues.contains_key(&issue.id) {
             return Err(Error::AlreadyExists(issue.id));
         }
         self.issues.insert(issue.id.clone(), issue);
-        self.save()
+        self.save_locked()
     }
 
     pub fn update(&mut self, issue: Issue) -> Result<()> {
+        let _lock = self.acquire_lock()?;
+        self.load()?;
         if !self.issues.contains_key(&issue.id) {
             return Err(Error::NotFound(issue.id));
         }
         self.issues.insert(issue.id.clone(), issue);
-        self.save()
+        self.save_locked()
     }
 
     pub fn delete(&mut self, id: &str, by: Option<String>, reason: Option<String>) -> Result<()> {
+        let _lock = self.acquire_lock()?;
+        self.load()?;
         let issue = self
             .issues
             .get_mut(id)
             .ok_or_else(|| Error::NotFound(id.to_string()))?;
         issue.delete(by, reason);
-        self.save()
+        self.save_locked()
     }
 
     pub fn list(&self, include_tombstones: bool) -> Vec<&Issue> {
@@ -255,5 +277,84 @@ prefix = "{}"
             }
         }
         Ok("trx".to_string())
+    }
+}
+
+struct StoreLock {
+    path: PathBuf,
+}
+
+impl StoreLock {
+    fn acquire(path: PathBuf) -> Result<Self> {
+        let start = Instant::now();
+        loop {
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(mut file) => {
+                    writeln!(
+                        file,
+                        "pid={} acquired_at={}",
+                        std::process::id(),
+                        chrono::Utc::now()
+                    )?;
+                    file.sync_all()?;
+                    return Ok(Self { path });
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if start.elapsed() >= LOCK_TIMEOUT {
+                        return Err(Error::Other(format!(
+                            "Timed out waiting for store lock at {}. Another trx process may be running; remove the lock only if no trx process is active.",
+                            path.display()
+                        )));
+                    }
+                    thread::sleep(LOCK_RETRY_DELAY);
+                }
+                Err(err) => return Err(Error::Io(err)),
+            }
+        }
+    }
+}
+
+impl Drop for StoreLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn test_concurrent_creates_are_serialized_without_lost_issues() {
+        let temp = tempfile::tempdir().unwrap();
+        let old_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(temp.path()).unwrap();
+        Store::init("trx").unwrap();
+        std::env::set_current_dir(old_cwd).unwrap();
+
+        let root = temp.path().to_path_buf();
+        let barrier = Arc::new(Barrier::new(8));
+        let mut handles = Vec::new();
+        for n in 0..8 {
+            let root = root.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                let mut store = Store::open_at(root).unwrap();
+                let id = format!("trx-{n}");
+                barrier.wait();
+                store.create(Issue::new(id, format!("issue {n}"))).unwrap();
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let store = Store::open_at(temp.path().to_path_buf()).unwrap();
+        assert_eq!(store.list(false).len(), 8);
+        for n in 0..8 {
+            assert!(store.get(&format!("trx-{n}")).is_some());
+        }
     }
 }

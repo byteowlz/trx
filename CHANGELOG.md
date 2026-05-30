@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Fixed
+
+- Serialize `.trx/issues.jsonl` mutations with a lock file and reload under the lock so concurrent `trx create`/update/delete commands cannot corrupt or overwrite the JSONL store.
+- Make `trx-core` AGENT_CTX environment tests isolate all known context variables so they pass when run inside an agent harness that sets AGENT_CTX values.
+
 ## [0.6.0] - 2026-05-16
 
 ### Added

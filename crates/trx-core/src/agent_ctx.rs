@@ -147,28 +147,58 @@ fn read(name: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// Helper that sets env vars, runs a closure, and restores. Tests share a
-    /// process so we serialize via a mutex.
-    fn with_env<F: FnOnce()>(vars: &[(&str, &str)], f: F) {
-        use std::sync::Mutex;
-        static LOCK: Mutex<()> = Mutex::new(());
-        let _g = LOCK.lock().unwrap();
+    const ALL_AGENT_CTX_ENV: &[&str] = &[
+        "AGENT_CTX_VERSION",
+        "AGENT_CTX_PLATFORM_NAME",
+        "AGENT_CTX_PLATFORM_VERSION",
+        "AGENT_CTX_HARNESS",
+        "AGENT_CTX_RUN_MODE",
+        "AGENT_CTX_PLATFORM_SESSION_ID",
+        "AGENT_CTX_HARNESS_SESSION_ID",
+        "AGENT_CTX_SESSION_NAME",
+        "AGENT_CTX_READABLE_ID",
+        "AGENT_CTX_WORKSPACE_ID",
+        "AGENT_CTX_WORKSPACE_PATH",
+        "AGENT_CTX_USER_ID",
+        "AGENT_CTX_MODEL",
+        "AGENT_CTX_REQUEST_ID",
+        "AGENT_CTX_CORRELATION_ID",
+        "AGENT_CTX_SANDBOX_PROFILE",
+    ];
 
-        let prior: Vec<(String, Option<String>)> = vars
+    /// Helper that replaces all AGENT_CTX vars, runs a closure, and restores.
+    /// Tests share a process so we serialize via a mutex. The harness running
+    /// the tests may itself set AGENT_CTX_* values, so every known field must
+    /// be cleared unless explicitly provided by the test.
+    fn with_env<F: FnOnce()>(vars: &[(&str, &str)], f: F) {
+        use std::panic::{AssertUnwindSafe, resume_unwind};
+        use std::sync::Mutex;
+
+        static LOCK: Mutex<()> = Mutex::new(());
+        let _g = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let prior: Vec<(String, Option<String>)> = ALL_AGENT_CTX_ENV
             .iter()
-            .map(|(k, _)| (k.to_string(), std::env::var(k).ok()))
+            .map(|k| (k.to_string(), std::env::var(k).ok()))
             .collect();
+        for k in ALL_AGENT_CTX_ENV {
+            unsafe { std::env::remove_var(k) };
+        }
         for (k, v) in vars {
             unsafe { std::env::set_var(k, v) };
         }
 
-        f();
+        let result = std::panic::catch_unwind(AssertUnwindSafe(f));
 
         for (k, prior) in prior {
             match prior {
                 Some(v) => unsafe { std::env::set_var(&k, v) },
                 None => unsafe { std::env::remove_var(&k) },
             }
+        }
+
+        if let Err(payload) = result {
+            resume_unwind(payload);
         }
     }
 
