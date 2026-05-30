@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## [0.6.1] - 2026-05-30
+
 ### Fixed
 
 - Serialize `.trx/issues.jsonl` mutations with a lock file and reload under the lock so concurrent `trx create`/update/delete commands cannot corrupt or overwrite the JSONL store.
