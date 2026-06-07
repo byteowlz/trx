@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Added
+
+- TUI now uses a top view bar with issue counts and a two-pane body instead of the space-heavy left sidebar, with a narrow-terminal single-pane fallback.
+- TUI supports `$VISUAL`/`$EDITOR` workflows: `E` edits the selected issue description and `N` adds a note, restoring the terminal UI on editor exit.
+- TUI session view now uses human-friendly session names, explains unattributed events, shows actor/action/issue summaries, and lists touched issues before the timeline.
+- TUI secondary text now uses higher-contrast gray and session summaries use words instead of cryptic glyph counters.
+
 ## [0.6.1] - 2026-05-30
 
 ### Fixed

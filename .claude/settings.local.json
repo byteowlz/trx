@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir -p /tmp/trx-mig-test)",
+      "Bash(rm -rf /tmp/trx-mig-test/*)",
+      "Bash(cp -r /home/wismut/byteowlz/trx/.trx /tmp/trx-mig-test/)",
+      "Read(//tmp/trx-mig-test/**)"
+    ]
+  }
+}
