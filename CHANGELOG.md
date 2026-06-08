@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- TUI issue list now renders epics and any issue with children as a collapsible nested tree (default on). Parentage comes from `parent_child` dependencies or the `epic.N` id convention; collapsed parents show a `(N)` hidden-child count. Keys: `z` fold/unfold the row, `h`/`Left` collapse-or-jump-to-parent, `l`/`Right` expand-or-descend, `Z` toggle nested tree ↔ flat list. Fold state persists for the session.
 - TUI now uses a top view bar with issue counts and a two-pane body instead of the space-heavy left sidebar, with a narrow-terminal single-pane fallback.
 - TUI supports `$VISUAL`/`$EDITOR` workflows: `E` edits the selected issue description and `N` adds a note, restoring the terminal UI on editor exit.
 - TUI session view now uses human-friendly session names, explains unattributed events, shows actor/action/issue summaries, and lists touched issues before the timeline.

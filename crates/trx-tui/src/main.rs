@@ -21,14 +21,14 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Write as IoWrite};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 use trx_core::{
-    Event, EventAction, EventLog, FieldChange, Issue, IssueGraph, SessionSummary, Status, Store,
-    summarize_sessions,
+    DependencyType, Event, EventAction, EventLog, FieldChange, Issue, IssueGraph, SessionSummary,
+    Status, Store, summarize_sessions,
 };
 
 #[derive(Parser)]
@@ -404,6 +404,133 @@ fn parse_key_action(key: KeyEvent) -> KeyAction {
     }
 }
 
+/// Resolve an issue's parent id for the tree view: prefer an explicit
+/// `ParentChild` dependency, otherwise fall back to the `epic.N` id-prefix
+/// convention (`trx-40mg.1` -> `trx-40mg`).
+fn resolve_parent_id(issue: &Issue) -> Option<String> {
+    if let Some(dep) = issue
+        .dependencies
+        .iter()
+        .find(|d| d.dep_type == DependencyType::ParentChild)
+    {
+        return Some(dep.depends_on_id.clone());
+    }
+    issue.id.rfind('.').map(|pos| issue.id[..pos].to_string())
+}
+
+/// A flat, render-ready tree layout: `issues` in parent-before-children order
+/// (rows hidden under a collapsed ancestor are omitted), with parallel
+/// `depth` / `has_children` / `child_count` metadata.
+struct TreeLayout {
+    issues: Vec<Issue>,
+    depth: Vec<usize>,
+    has_children: Vec<bool>,
+    child_count: Vec<usize>,
+}
+
+/// Arrange a filtered, pre-sorted issue list into a collapsible tree layout.
+///
+/// Parentage comes from [`resolve_parent_id`]; only edges where both ends are
+/// present in `issues` are honored, so a child whose parent was filtered out
+/// floats up to a root. Subtrees under an id in `collapsed` are pruned from the
+/// output but their parent still reports `has_children`/`child_count`. Sibling
+/// order follows the input order. Cycles are broken defensively so no issue is
+/// ever dropped.
+fn build_tree_layout(issues: Vec<Issue>, collapsed: &HashSet<String>) -> TreeLayout {
+    let n = issues.len();
+
+    let id_to_idx: HashMap<&str, usize> = issues
+        .iter()
+        .enumerate()
+        .map(|(i, is)| (is.id.as_str(), i))
+        .collect();
+
+    // Resolve each issue's parent index, if its parent is also present.
+    let parent_of: Vec<Option<usize>> = issues
+        .iter()
+        .map(|is| resolve_parent_id(is).and_then(|pid| id_to_idx.get(pid.as_str()).copied()))
+        .collect();
+
+    // Build child adjacency, preserving the existing sorted order.
+    let mut children: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut roots: Vec<usize> = Vec::new();
+    for (i, slot) in parent_of.iter().enumerate() {
+        match *slot {
+            Some(p) if p != i => children[p].push(i),
+            _ => roots.push(i),
+        }
+    }
+
+    // A node is hidden when any ancestor is collapsed.
+    let is_hidden = |start: usize| -> bool {
+        let mut cur = parent_of[start];
+        let mut steps = 0;
+        while let Some(p) = cur {
+            if steps > n {
+                break; // cycle guard
+            }
+            if collapsed.contains(&issues[p].id) {
+                return true;
+            }
+            cur = parent_of[p];
+            steps += 1;
+        }
+        false
+    };
+
+    // Depth-first emit, pruning collapsed subtrees.
+    let mut order: Vec<usize> = Vec::with_capacity(n);
+    let mut depth: Vec<usize> = Vec::with_capacity(n);
+    let mut visited = vec![false; n];
+    let mut stack: Vec<(usize, usize)> = roots.iter().rev().map(|&r| (r, 0usize)).collect();
+    while let Some((idx, d)) = stack.pop() {
+        if visited[idx] {
+            continue;
+        }
+        visited[idx] = true;
+        order.push(idx);
+        depth.push(d);
+        if !collapsed.contains(&issues[idx].id) {
+            for &k in children[idx].iter().rev() {
+                if !visited[k] {
+                    stack.push((k, d + 1));
+                }
+            }
+        }
+    }
+    // Cycle fallback: surface any still-unvisited rows that aren't hidden by a
+    // collapse, so issues never silently disappear.
+    #[allow(clippy::needless_range_loop)]
+    for i in 0..n {
+        if !visited[i] && !is_hidden(i) {
+            order.push(i);
+            depth.push(0);
+            visited[i] = true;
+        }
+    }
+
+    let mut slots: Vec<Option<Issue>> = issues.into_iter().map(Some).collect();
+    let mut out_issues = Vec::with_capacity(order.len());
+    let mut out_depth = Vec::with_capacity(order.len());
+    let mut out_has = Vec::with_capacity(order.len());
+    let mut out_count = Vec::with_capacity(order.len());
+    for (k, &idx) in order.iter().enumerate() {
+        if let Some(is) = slots[idx].take() {
+            out_issues.push(is);
+            out_depth.push(depth[k]);
+            out_has.push(!children[idx].is_empty());
+            out_count.push(children[idx].len());
+        }
+    }
+
+    TreeLayout {
+        issues: out_issues,
+        depth: out_depth,
+        has_children: out_has,
+        child_count: out_count,
+    }
+}
+
 struct App {
     filtered_issues: Vec<Issue>,
     mode: AppMode,
@@ -430,6 +557,15 @@ struct App {
     verbose_ctx: bool,
     follow: bool,
     follow_counter: u32,
+
+    // Nested tree view of epics / parents and their children.
+    tree_view: bool,
+    /// Parent issue IDs whose children are currently folded away.
+    collapsed: HashSet<String>,
+    /// Per-row tree metadata, parallel to `filtered_issues`.
+    row_depth: Vec<usize>,
+    row_has_children: Vec<bool>,
+    row_child_count: Vec<usize>,
 }
 
 /// Which list the middle pane shows.
@@ -613,8 +749,8 @@ impl FilterState {
             return false;
         }
 
-        if !self.enabled_statuses.contains(&issue.status)
-            && !(self.show_closed && issue.status == Status::Closed)
+        if !(self.enabled_statuses.contains(&issue.status)
+            || self.show_closed && issue.status == Status::Closed)
         {
             return false;
         }
@@ -678,6 +814,11 @@ impl App {
             verbose_ctx: false,
             follow: false,
             follow_counter: 0,
+            tree_view: true,
+            collapsed: HashSet::new(),
+            row_depth: Vec::new(),
+            row_has_children: Vec::new(),
+            row_child_count: Vec::new(),
         };
 
         app.apply_filters()?;
@@ -752,12 +893,115 @@ impl App {
                 .then_with(|| b.created_at.cmp(&a.created_at))
         });
 
+        if self.tree_view {
+            self.arrange_tree();
+        } else {
+            let n = self.filtered_issues.len();
+            self.row_depth = vec![0; n];
+            self.row_has_children = vec![false; n];
+            self.row_child_count = vec![0; n];
+        }
+
         let max = self.filtered_issues.len();
         if self.selection.index >= max {
             self.selection.index = max.saturating_sub(1);
         }
 
         self.show_status(format!("Showing {} issues", self.filtered_issues.len()));
+        Ok(())
+    }
+
+    /// Reorder `filtered_issues` into a parent-before-children depth-first
+    /// layout, dropping rows hidden under a collapsed ancestor, and fill the
+    /// parallel `row_*` metadata used by the renderer. Parentage is resolved
+    /// from an explicit `ParentChild` dependency, falling back to the
+    /// `epic.N` id-prefix convention. Only edges where both ends survived the
+    /// active filters are honored; everything else floats up to a root.
+    fn arrange_tree(&mut self) {
+        let issues = std::mem::take(&mut self.filtered_issues);
+        let layout = build_tree_layout(issues, &self.collapsed);
+        self.filtered_issues = layout.issues;
+        self.row_depth = layout.depth;
+        self.row_has_children = layout.has_children;
+        self.row_child_count = layout.child_count;
+        // Positional multi-select indices no longer line up after a reorder.
+        self.selection.selected_indices.clear();
+    }
+
+    /// Toggle the fold state of the parent under the cursor and keep the
+    /// cursor anchored to it across the rebuild.
+    fn toggle_fold(&mut self) -> Result<()> {
+        if !self.tree_view || self.middle_view != MiddleView::Issues {
+            return Ok(());
+        }
+        let idx = self.selection.index;
+        if !self.row_has_children.get(idx).copied().unwrap_or(false) {
+            return Ok(());
+        }
+        let id = self.filtered_issues[idx].id.clone();
+        if !self.collapsed.remove(&id) {
+            self.collapsed.insert(id.clone());
+        }
+        self.rebuild_anchored(&id)
+    }
+
+    /// Left/`h`: collapse the current parent if expanded, otherwise hop up to
+    /// the parent row.
+    fn collapse_or_ascend(&mut self) -> Result<()> {
+        if !self.tree_view || self.middle_view != MiddleView::Issues {
+            return Ok(());
+        }
+        let idx = self.selection.index;
+        let has_children = self.row_has_children.get(idx).copied().unwrap_or(false);
+        let id = match self.filtered_issues.get(idx) {
+            Some(is) => is.id.clone(),
+            None => return Ok(()),
+        };
+        if has_children && !self.collapsed.contains(&id) {
+            self.collapsed.insert(id.clone());
+            return self.rebuild_anchored(&id);
+        }
+        // Jump to the nearest ancestor row above the cursor.
+        let depth = self.row_depth.get(idx).copied().unwrap_or(0);
+        if depth > 0 {
+            for j in (0..idx).rev() {
+                if self.row_depth[j] < depth {
+                    self.selection.index = j;
+                    self.selection.adjust_offset(0);
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Right/`l`: expand the current parent if collapsed, otherwise step down
+    /// into the subtree.
+    fn expand_or_descend(&mut self) -> Result<()> {
+        if !self.tree_view || self.middle_view != MiddleView::Issues {
+            return Ok(());
+        }
+        let idx = self.selection.index;
+        let has_children = self.row_has_children.get(idx).copied().unwrap_or(false);
+        let id = match self.filtered_issues.get(idx) {
+            Some(is) => is.id.clone(),
+            None => return Ok(()),
+        };
+        if has_children && self.collapsed.contains(&id) {
+            self.collapsed.remove(&id);
+            return self.rebuild_anchored(&id);
+        }
+        self.selection.next(self.filtered_issues.len(), 20);
+        Ok(())
+    }
+
+    /// Re-run filtering/arrangement, then restore the cursor to `anchor_id`.
+    fn rebuild_anchored(&mut self, anchor_id: &str) -> Result<()> {
+        self.apply_filters()?;
+        if let Some(pos) = self.filtered_issues.iter().position(|i| i.id == anchor_id) {
+            self.selection.index = pos;
+            self.selection.adjust_offset(0);
+        }
         Ok(())
     }
 
@@ -828,6 +1072,23 @@ impl App {
                 MiddleView::Issues => self.selection.page_up(),
                 MiddleView::Sessions => self.session_selection.page_up(),
             },
+            KeyAction::Left => {
+                let _ = self.collapse_or_ascend();
+            }
+            KeyAction::Right => {
+                let _ = self.expand_or_descend();
+            }
+            KeyAction::Char('z') => {
+                let _ = self.toggle_fold();
+            }
+            KeyAction::Char('Z') => {
+                self.tree_view = !self.tree_view;
+                self.apply_filters()?;
+                self.show_status(format!(
+                    "Tree: {}",
+                    if self.tree_view { "nested" } else { "flat" }
+                ));
+            }
             KeyAction::Char('g') => {
                 if self.g_prefix {
                     self.selection.top();
@@ -1744,8 +2005,38 @@ fn render_middle_pane(f: &mut Frame, app: &mut App, area: Rect) {
                 prefix = "> ".to_string();
             }
 
+            // Tree indentation + fold marker (only in nested mode).
+            let tree_prefix = if app.tree_view {
+                let depth = app.row_depth.get(idx).copied().unwrap_or(0);
+                let has_children = app.row_has_children.get(idx).copied().unwrap_or(false);
+                let indent = "  ".repeat(depth);
+                let marker = if has_children {
+                    if app.collapsed.contains(&issue.id) {
+                        "▸ "
+                    } else {
+                        "▾ "
+                    }
+                } else {
+                    "  "
+                };
+                format!("{indent}{marker}")
+            } else {
+                String::new()
+            };
+
+            // Show how many children are hidden behind a collapsed parent.
+            let count_suffix = if app.tree_view
+                && app.collapsed.contains(&issue.id)
+                && app.row_child_count.get(idx).copied().unwrap_or(0) > 0
+            {
+                format!(" ({})", app.row_child_count[idx])
+            } else {
+                String::new()
+            };
+
             let content = Line::from(vec![
                 Span::styled(prefix, Style::default()),
+                Span::styled(tree_prefix, secondary_style()),
                 Span::styled(issue.id.clone(), Style::default().fg(Color::Cyan)),
                 Span::raw(" "),
                 Span::styled(
@@ -1760,6 +2051,7 @@ fn render_middle_pane(f: &mut Frame, app: &mut App, area: Rect) {
                 ),
                 Span::styled(format!("{} ", issue.status), status_style),
                 Span::styled(title, Style::default()),
+                Span::styled(count_suffix, secondary_style()),
             ]);
 
             ListItem::new(content)
@@ -1771,7 +2063,11 @@ fn render_middle_pane(f: &mut Frame, app: &mut App, area: Rect) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Blue))
-                .title(format!("Issues ({})", app.filtered_issues.len())),
+                .title(format!(
+                    "Issues ({}){}",
+                    app.filtered_issues.len(),
+                    if app.tree_view { " [tree]" } else { "" }
+                )),
         )
         .highlight_style(
             Style::default()
@@ -2437,6 +2733,12 @@ fn render_help_overlay(f: &mut Frame) {
         Line::from("  Space      Toggle selection"),
         Line::from("  Ctrl-a     Select all"),
         Line::from("  V          Clear selection"),
+        Line::from(""),
+        Line::from("Tree (epics & children):"),
+        Line::from("  z          Fold/unfold the parent under the cursor"),
+        Line::from("  h/Left     Collapse parent, or jump to its parent"),
+        Line::from("  l/Right    Expand parent, or step into children"),
+        Line::from("  Z          Toggle nested tree ↔ flat list"),
         Line::from(""),
         Line::from("Actions:"),
         Line::from("  a          Add issue"),
@@ -3182,4 +3484,120 @@ fn render_dashboard_tail(f: &mut Frame, app: &App, area: Rect) {
             .title(title),
     );
     f.render_widget(para, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use trx_core::Issue;
+
+    fn issue(id: &str) -> Issue {
+        Issue::new(id.to_string(), format!("title {id}"))
+    }
+
+    fn child(id: &str, parent: &str) -> Issue {
+        let mut i = issue(id);
+        i.add_dependency(parent.to_string(), DependencyType::ParentChild);
+        i
+    }
+
+    fn ids(layout: &TreeLayout) -> Vec<String> {
+        layout.issues.iter().map(|i| i.id.clone()).collect()
+    }
+
+    #[test]
+    fn test_parent_from_explicit_dependency() {
+        let c = child("trx-zzzz", "trx-epic");
+        assert_eq!(resolve_parent_id(&c).as_deref(), Some("trx-epic"));
+    }
+
+    #[test]
+    fn test_parent_from_id_prefix() {
+        // No dependency, but the dotted id encodes the parent.
+        assert_eq!(
+            resolve_parent_id(&issue("trx-epic.2")).as_deref(),
+            Some("trx-epic")
+        );
+        assert_eq!(
+            resolve_parent_id(&issue("trx-epic.2.1")).as_deref(),
+            Some("trx-epic.2")
+        );
+        assert_eq!(resolve_parent_id(&issue("trx-root")), None);
+    }
+
+    #[test]
+    fn test_layout_nests_children_under_parent() {
+        let issues = vec![
+            issue("trx-epic"),
+            child("trx-epic.1", "trx-epic"),
+            issue("trx-other"),
+        ];
+        let layout = build_tree_layout(issues, &HashSet::new());
+
+        assert_eq!(ids(&layout), vec!["trx-epic", "trx-epic.1", "trx-other"]);
+        assert_eq!(layout.depth, vec![0, 1, 0]);
+        assert_eq!(layout.has_children, vec![true, false, false]);
+        assert_eq!(layout.child_count, vec![1, 0, 0]);
+    }
+
+    #[test]
+    fn test_layout_id_prefix_without_dependency() {
+        // Child linked only by dotted id, no ParentChild dep.
+        let issues = vec![issue("trx-epic"), issue("trx-epic.1")];
+        let layout = build_tree_layout(issues, &HashSet::new());
+        assert_eq!(ids(&layout), vec!["trx-epic", "trx-epic.1"]);
+        assert_eq!(layout.depth, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_collapsed_parent_hides_descendants() {
+        let issues = vec![
+            issue("trx-epic"),
+            child("trx-epic.1", "trx-epic"),
+            child("trx-epic.2", "trx-epic"),
+            issue("trx-other"),
+        ];
+        let mut collapsed = HashSet::new();
+        collapsed.insert("trx-epic".to_string());
+        let layout = build_tree_layout(issues, &collapsed);
+
+        // Children of the collapsed epic are gone, but it still reports them.
+        assert_eq!(ids(&layout), vec!["trx-epic", "trx-other"]);
+        assert_eq!(layout.has_children, vec![true, false]);
+        assert_eq!(layout.child_count, vec![2, 0]);
+    }
+
+    #[test]
+    fn test_orphan_child_floats_to_root() {
+        // Parent not present in the filtered set -> child shown at depth 0.
+        let issues = vec![child("trx-epic.1", "trx-epic")];
+        let layout = build_tree_layout(issues, &HashSet::new());
+        assert_eq!(ids(&layout), vec!["trx-epic.1"]);
+        assert_eq!(layout.depth, vec![0]);
+        assert_eq!(layout.has_children, vec![false]);
+    }
+
+    #[test]
+    fn test_cycle_does_not_drop_issues() {
+        // Two issues that claim each other as parent via explicit deps.
+        let mut a = issue("trx-aaaa");
+        a.add_dependency("trx-bbbb".to_string(), DependencyType::ParentChild);
+        let mut b = issue("trx-bbbb");
+        b.add_dependency("trx-aaaa".to_string(), DependencyType::ParentChild);
+        let layout = build_tree_layout(vec![a, b], &HashSet::new());
+        // No root exists, but neither issue may vanish.
+        assert_eq!(layout.issues.len(), 2);
+    }
+
+    #[test]
+    fn test_nested_grandchildren_depth() {
+        let issues = vec![
+            issue("trx-epic"),
+            child("trx-epic.1", "trx-epic"),
+            child("trx-epic.1.1", "trx-epic.1"),
+        ];
+        let layout = build_tree_layout(issues, &HashSet::new());
+        assert_eq!(ids(&layout), vec!["trx-epic", "trx-epic.1", "trx-epic.1.1"]);
+        assert_eq!(layout.depth, vec![0, 1, 2]);
+    }
 }
