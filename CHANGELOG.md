@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TUI session view now uses human-friendly session names, explains unattributed events, shows actor/action/issue summaries, and lists touched issues before the timeline.
 - TUI secondary text now uses higher-contrast gray and session summaries use words instead of cryptic glyph counters.
 
+### Fixed
+
+- Store discovery now stops at the current git repository boundary: running `trx` inside a repo without `.trx/` no longer falls through to a parent repo's tracker store.
+
 ## [0.6.1] - 2026-05-30
 
 ### Fixed

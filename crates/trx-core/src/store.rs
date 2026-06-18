@@ -10,7 +10,7 @@ use crate::{Error, Issue, Result, legacy_crdt};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -81,13 +81,43 @@ prefix = "{}"
     }
 
     fn find_root() -> Result<PathBuf> {
-        let mut current = std::env::current_dir()?;
+        let start = std::env::current_dir()?;
+
+        if let Some(git_root) = Self::find_git_root_from(&start) {
+            let mut current = start;
+            loop {
+                if current.join(TRX_DIR).exists() {
+                    return Ok(current);
+                }
+                if current == git_root {
+                    return Err(Error::NotInitialized);
+                }
+                if !current.pop() {
+                    return Err(Error::NotInitialized);
+                }
+            }
+        }
+
+        // Outside a git repo, keep legacy behavior and search to filesystem root.
+        let mut current = start;
         loop {
             if current.join(TRX_DIR).exists() {
                 return Ok(current);
             }
             if !current.pop() {
                 return Err(Error::NotInitialized);
+            }
+        }
+    }
+
+    fn find_git_root_from(start: &Path) -> Option<PathBuf> {
+        let mut current = start.to_path_buf();
+        loop {
+            if current.join(".git").exists() {
+                return Some(current);
+            }
+            if !current.pop() {
+                return None;
             }
         }
     }
@@ -356,5 +386,42 @@ mod tests {
         for n in 0..8 {
             assert!(store.get(&format!("trx-{n}")).is_some());
         }
+    }
+
+    #[test]
+    fn test_find_root_does_not_cross_git_boundary() {
+        let temp = tempfile::tempdir().unwrap();
+        let old_cwd = std::env::current_dir().unwrap();
+
+        // Parent tracker exists, but child repo has its own git boundary.
+        fs::create_dir_all(temp.path().join(TRX_DIR)).unwrap();
+        let repo = temp.path().join("child-repo");
+        let nested = repo.join("src/nested");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        fs::create_dir_all(&nested).unwrap();
+
+        std::env::set_current_dir(&nested).unwrap();
+        let root = Store::find_root();
+        std::env::set_current_dir(old_cwd).unwrap();
+
+        assert!(matches!(root, Err(Error::NotInitialized)));
+    }
+
+    #[test]
+    fn test_find_root_within_git_boundary_finds_repo_trx() {
+        let temp = tempfile::tempdir().unwrap();
+        let old_cwd = std::env::current_dir().unwrap();
+
+        let repo = temp.path().join("repo");
+        let nested = repo.join("src/nested");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        fs::create_dir_all(repo.join(TRX_DIR)).unwrap();
+        fs::create_dir_all(&nested).unwrap();
+
+        std::env::set_current_dir(&nested).unwrap();
+        let root = Store::find_root().unwrap();
+        std::env::set_current_dir(old_cwd).unwrap();
+
+        assert_eq!(root, repo);
     }
 }
