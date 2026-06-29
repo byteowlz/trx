@@ -347,18 +347,25 @@ enum AppMode {
     Help,
     Sort,
     Filter,
-    WhichKey(WhichKeyContext),
+    EditMenu(EditMenu),
+    TextEntry(TextEntry),
     AddIssue,
     EditIssue,
     Dashboard,
 }
 
+/// Quick single-key inline editors that mutate the selected issue in place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WhichKeyContext {
-    Status,
+enum EditMenu {
     Priority,
     Type,
+}
+
+/// Free-text inline editors that mutate the selected issue in place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TextEntry {
     Labels,
+    Assignee,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -402,6 +409,20 @@ fn parse_key_action(key: KeyEvent) -> KeyAction {
         KeyCode::Char(c) => KeyAction::Char(c),
         _ => KeyAction::Noop,
     }
+}
+
+/// Parse a free-text label input into a deduplicated, order-preserving list of
+/// labels. Labels are separated by commas and/or whitespace; empty tokens are
+/// dropped.
+fn parse_labels(input: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for token in input.split(|c: char| c == ',' || c.is_whitespace()) {
+        let token = token.trim();
+        if !token.is_empty() && !out.iter().any(|l| l == token) {
+            out.push(token.to_string());
+        }
+    }
+    out
 }
 
 /// Resolve an issue's parent id for the tree view: prefer an explicit
@@ -547,6 +568,12 @@ struct App {
     status_message_time: Option<Instant>,
 
     issue_form: IssueForm,
+
+    /// Scratch buffer for free-text inline editors (labels, assignee).
+    edit_buffer: String,
+    /// Whether the right detail pane is shown. When off, the list/tree takes
+    /// the full width regardless of terminal size.
+    show_detail: bool,
 
     // Event log + visualizations.
     events: Vec<Event>,
@@ -806,6 +833,8 @@ impl App {
             status_message: None,
             status_message_time: None,
             issue_form: IssueForm::new(),
+            edit_buffer: String::new(),
+            show_detail: true,
             events: Vec::new(),
             sessions: Vec::new(),
             session_selection: SelectionState::new(),
@@ -1012,7 +1041,8 @@ impl App {
             AppMode::Help => self.handle_help_mode(action),
             AppMode::Sort => self.handle_sort_mode(action),
             AppMode::Filter => self.handle_filter_mode(action),
-            AppMode::WhichKey(ctx) => self.handle_which_key_mode(ctx, action),
+            AppMode::EditMenu(menu) => self.handle_edit_menu_mode(menu, action),
+            AppMode::TextEntry(field) => self.handle_text_entry_mode(field, action),
             AppMode::AddIssue => self.handle_add_issue_mode(action),
             AppMode::EditIssue => self.handle_edit_issue_mode(action),
             AppMode::Dashboard => self.handle_dashboard_mode(action),
@@ -1216,13 +1246,33 @@ impl App {
                 self.show_status("Dashboard — press D or Esc to exit".to_string());
             }
             KeyAction::Char('t') => {
-                self.mode = AppMode::WhichKey(WhichKeyContext::Type);
+                if self.current_issue().is_some() {
+                    self.mode = AppMode::EditMenu(EditMenu::Type);
+                }
             }
             KeyAction::Char('p') => {
-                self.mode = AppMode::WhichKey(WhichKeyContext::Priority);
+                if self.current_issue().is_some() {
+                    self.mode = AppMode::EditMenu(EditMenu::Priority);
+                }
             }
-            KeyAction::Char('l') => {
-                self.mode = AppMode::WhichKey(WhichKeyContext::Labels);
+            KeyAction::Char('m') => {
+                if let Some(issue) = self.current_issue() {
+                    self.edit_buffer = issue.assignee.clone().unwrap_or_default();
+                    self.mode = AppMode::TextEntry(TextEntry::Assignee);
+                }
+            }
+            KeyAction::Char('L') => {
+                if let Some(issue) = self.current_issue() {
+                    self.edit_buffer = issue.labels.join(", ");
+                    self.mode = AppMode::TextEntry(TextEntry::Labels);
+                }
+            }
+            KeyAction::Tab => {
+                self.show_detail = !self.show_detail;
+                self.show_status(format!(
+                    "Detail pane: {}",
+                    if self.show_detail { "shown" } else { "hidden" }
+                ));
             }
             KeyAction::Char('f') => {
                 self.mode = AppMode::Filter;
@@ -1370,78 +1420,146 @@ impl App {
         self.mode = AppMode::Normal;
     }
 
-    fn handle_which_key_mode(&mut self, ctx: WhichKeyContext, action: KeyAction) -> Result<bool> {
+    /// Quick single-key editor menu (priority / type) that mutates the
+    /// selected issue and returns to normal mode.
+    fn handle_edit_menu_mode(&mut self, menu: EditMenu, action: KeyAction) -> Result<bool> {
+        let KeyAction::Char(c) = action else {
+            if action == KeyAction::Escape {
+                self.mode = AppMode::Normal;
+            }
+            return Ok(false);
+        };
+        let applied = match menu {
+            EditMenu::Priority => match c.to_digit(10) {
+                Some(d) if d <= 4 => {
+                    self.set_priority(d as u8)?;
+                    true
+                }
+                _ => false,
+            },
+            EditMenu::Type => {
+                let t = match c {
+                    '1' => Some(trx_core::IssueType::Bug),
+                    '2' => Some(trx_core::IssueType::Feature),
+                    '3' => Some(trx_core::IssueType::Task),
+                    '4' => Some(trx_core::IssueType::Epic),
+                    '5' => Some(trx_core::IssueType::Chore),
+                    _ => None,
+                };
+                match t {
+                    Some(t) => {
+                        self.set_type(t)?;
+                        true
+                    }
+                    None => false,
+                }
+            }
+        };
+        if applied {
+            self.mode = AppMode::Normal;
+        }
+        Ok(false)
+    }
+
+    /// Free-text editor (labels / assignee) for the selected issue.
+    fn handle_text_entry_mode(&mut self, field: TextEntry, action: KeyAction) -> Result<bool> {
         match action {
             KeyAction::Escape => {
                 self.mode = AppMode::Normal;
+                self.edit_buffer.clear();
             }
-            KeyAction::Char('1') => match ctx {
-                WhichKeyContext::Status => {
-                    self.toggle_status_filter(Status::Open);
+            KeyAction::Enter => {
+                match field {
+                    TextEntry::Labels => self.apply_labels_input()?,
+                    TextEntry::Assignee => self.apply_assignee_input()?,
                 }
-                WhichKeyContext::Type => {
-                    self.toggle_type_filter(trx_core::IssueType::Bug);
-                }
-                WhichKeyContext::Priority => {
-                    self.set_priority_filter(0);
-                }
-                _ => {}
-            },
-            KeyAction::Char('2') => match ctx {
-                WhichKeyContext::Status => {
-                    self.toggle_status_filter(Status::InProgress);
-                }
-                WhichKeyContext::Type => {
-                    self.toggle_type_filter(trx_core::IssueType::Feature);
-                }
-                WhichKeyContext::Priority => {
-                    self.set_priority_filter(1);
-                }
-                _ => {}
-            },
-            KeyAction::Char('3') => match ctx {
-                WhichKeyContext::Status => {
-                    self.toggle_status_filter(Status::Blocked);
-                }
-                WhichKeyContext::Type => {
-                    self.toggle_type_filter(trx_core::IssueType::Task);
-                }
-                WhichKeyContext::Priority => {
-                    self.set_priority_filter(2);
-                }
-                _ => {}
-            },
-            KeyAction::Char('4') => match ctx {
-                WhichKeyContext::Type => {
-                    self.toggle_type_filter(trx_core::IssueType::Epic);
-                }
-                WhichKeyContext::Priority => {
-                    self.set_priority_filter(3);
-                }
-                _ => {}
-            },
-            KeyAction::Char('5') => match ctx {
-                WhichKeyContext::Type => {
-                    self.toggle_type_filter(trx_core::IssueType::Chore);
-                }
-                WhichKeyContext::Priority => {
-                    self.set_priority_filter(4);
-                }
-                _ => {}
-            },
-            KeyAction::Char('c') if ctx == WhichKeyContext::Status => {
-                self.filter_state.show_closed = !self.filter_state.show_closed;
-                self.apply_filters()?;
                 self.mode = AppMode::Normal;
+                self.edit_buffer.clear();
             }
-            KeyAction::Char('r') => {
-                self.apply_filters()?;
-                self.mode = AppMode::Normal;
+            KeyAction::Backspace => {
+                self.edit_buffer.pop();
             }
+            // Space arrives as ToggleSelect from the shared key parser; in a
+            // text field it should type a literal space.
+            KeyAction::ToggleSelect => self.edit_buffer.push(' '),
+            KeyAction::Char(c) => self.edit_buffer.push(c),
             _ => {}
         }
-
         Ok(false)
+    }
+
+    /// Set the selected issue's priority, keeping the cursor anchored across
+    /// the re-sort that a priority change triggers.
+    fn set_priority(&mut self, priority: u8) -> Result<()> {
+        let Some(issue) = self.current_issue() else {
+            return Ok(());
+        };
+        let id = issue.id.clone();
+        if issue.priority == priority {
+            self.show_status(format!("{} already P{}", id, priority));
+            return Ok(());
+        }
+        let mut updated = issue.clone();
+        updated.priority = priority;
+        updated.updated_at = chrono::Utc::now();
+        self.store.update(updated)?;
+        self.rebuild_anchored(&id)?;
+        self.show_status(format!("{} → P{}", id, priority));
+        Ok(())
+    }
+
+    /// Set the selected issue's type.
+    fn set_type(&mut self, issue_type: trx_core::IssueType) -> Result<()> {
+        let Some(issue) = self.current_issue() else {
+            return Ok(());
+        };
+        let id = issue.id.clone();
+        let mut updated = issue.clone();
+        updated.issue_type = issue_type;
+        updated.updated_at = chrono::Utc::now();
+        self.store.update(updated)?;
+        self.rebuild_anchored(&id)?;
+        self.show_status(format!("{} type → {}", id, issue_type));
+        Ok(())
+    }
+
+    /// Replace the selected issue's labels from the comma/space-separated
+    /// `edit_buffer`.
+    fn apply_labels_input(&mut self) -> Result<()> {
+        let Some(issue) = self.current_issue() else {
+            return Ok(());
+        };
+        let id = issue.id.clone();
+        let labels = parse_labels(&self.edit_buffer);
+        let mut updated = issue.clone();
+        updated.labels = labels;
+        updated.updated_at = chrono::Utc::now();
+        self.store.update(updated)?;
+        self.rebuild_anchored(&id)?;
+        self.show_status(format!("Updated labels for {}", id));
+        Ok(())
+    }
+
+    /// Set or clear the selected issue's assignee from `edit_buffer` (empty
+    /// clears it).
+    fn apply_assignee_input(&mut self) -> Result<()> {
+        let Some(issue) = self.current_issue() else {
+            return Ok(());
+        };
+        let id = issue.id.clone();
+        let trimmed = self.edit_buffer.trim();
+        let assignee = (!trimmed.is_empty()).then(|| trimmed.to_string());
+        let mut updated = issue.clone();
+        let msg = match &assignee {
+            Some(a) => format!("{} assigned to {}", id, a),
+            None => format!("{} unassigned", id),
+        };
+        updated.assignee = assignee;
+        updated.updated_at = chrono::Utc::now();
+        self.store.update(updated)?;
+        self.rebuild_anchored(&id)?;
+        self.show_status(msg);
+        Ok(())
     }
 
     fn toggle_status_filter(&mut self, status: Status) {
@@ -1460,12 +1578,6 @@ impl App {
             self.filter_state.enabled_types.insert(itype);
         }
         self.apply_filters().ok();
-    }
-
-    fn set_priority_filter(&mut self, priority: u8) {
-        self.filtered_issues.retain(|i| i.priority == priority);
-        self.show_status(format!("Filtered to P{}", priority));
-        self.mode = AppMode::Normal;
     }
 
     fn sort_by_priority(&mut self) {
@@ -1807,7 +1919,13 @@ fn ui(f: &mut Frame, app: &mut App) {
         .split(main_chunks[0]);
     render_view_bar(f, app, app_chunks[0]);
 
-    if size.width < 90 {
+    if !app.show_detail {
+        // Detail pane collapsed: the list/tree gets the full width.
+        match app.middle_view {
+            MiddleView::Issues => render_middle_pane(f, app, app_chunks[1]),
+            MiddleView::Sessions => render_sessions_pane(f, app, app_chunks[1]),
+        }
+    } else if size.width < 90 {
         match app.detail_view {
             DetailView::Issue if app.middle_view == MiddleView::Issues => {
                 render_right_pane(f, app, app_chunks[1]);
@@ -1841,7 +1959,8 @@ fn ui(f: &mut Frame, app: &mut App) {
         AppMode::Help => render_help_overlay(f),
         AppMode::Sort => render_sort_overlay(f),
         AppMode::Filter => render_filter_overlay(f, app),
-        AppMode::WhichKey(ctx) => render_which_key_overlay(f, *ctx),
+        AppMode::EditMenu(menu) => render_edit_menu_overlay(f, *menu),
+        AppMode::TextEntry(field) => render_text_entry_overlay(f, app, *field),
         AppMode::AddIssue => render_issue_form(f, app, "Add Issue"),
         AppMode::EditIssue => render_issue_form(f, app, "Edit Issue"),
         _ => {}
@@ -1883,7 +2002,7 @@ fn render_view_bar(f: &mut Frame, app: &App, area: Rect) {
     }
     spans.push(Span::styled(" │ ", secondary_style()));
     spans.push(Span::styled(
-        " / search  f filters  f→c closed  1 reopen  S sessions  T timeline  v ctx  E edit  ? help ",
+        " / search  f filters  p prio  t type  L labels  m assignee  Tab fullscreen  S sessions  E edit  ? help ",
         secondary_style(),
     ));
 
@@ -2655,7 +2774,8 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
         AppMode::Help => "[HELP]",
         AppMode::Sort => "[SORT]",
         AppMode::Filter => "[FILTER]",
-        AppMode::WhichKey(_) => "[WHICHKEY]",
+        AppMode::EditMenu(_) => "[EDIT]",
+        AppMode::TextEntry(_) => "[EDIT]",
         AppMode::AddIssue => "[ADD ISSUE]",
         AppMode::EditIssue => "[EDIT ISSUE]",
         AppMode::Dashboard => "[DASHBOARD]",
@@ -2695,7 +2815,7 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
                 view_tag, detail_tag, follow_tag, selected_count
             )),
             Span::raw(
-                "[S]essions [T]imeline [v]erbose [F]ollow [a]dd [e]dit [c]lose [/]search [?]help [q]uit",
+                "[p]rio [t]ype [L]abels [m]assignee [Tab]full [a]dd [e]dit [c]lose [/]search [?]help [q]uit",
             ),
         ])
     };
@@ -2746,7 +2866,14 @@ fn render_help_overlay(f: &mut Frame) {
         Line::from("  E          Edit description in $VISUAL/$EDITOR"),
         Line::from("  N          Add note in $VISUAL/$EDITOR"),
         Line::from("  c          Close issue"),
+        Line::from(""),
+        Line::from("Quick inline edits (selected issue):"),
         Line::from("  1-4        Set status (1 reopens to Open, 4 closes)"),
+        Line::from("  p          Set priority (0-4)"),
+        Line::from("  t          Set type (bug/feature/task/epic/chore)"),
+        Line::from("  L          Edit labels"),
+        Line::from("  m          Set/clear assignee"),
+        Line::from(""),
         Line::from("  /          Search"),
         Line::from("  s          Sort menu"),
         Line::from("  f          Filter menu; then c toggles closed issues"),
@@ -2758,6 +2885,7 @@ fn render_help_overlay(f: &mut Frame) {
         Line::from("Layout / activity:"),
         Line::from("  Top bar    Persistent view counts; no wide sidebar by default"),
         Line::from("  <90 cols   Adaptive single-pane focus on current detail/list"),
+        Line::from("  Tab        Collapse/show detail pane (full-width list)"),
         Line::from("  S          Toggle list pane: Issues ↔ Sessions"),
         Line::from("  T          Toggle details ↔ timeline/activity"),
         Line::from("  v          Toggle compact/verbose session context"),
@@ -2814,7 +2942,9 @@ fn render_sort_overlay(f: &mut Frame) {
     f.render_widget(paragraph, area);
 }
 
-fn render_which_key_overlay(f: &mut Frame, ctx: WhichKeyContext) {
+/// Bottom which-key style bar for the quick single-key inline editors. The
+/// chosen key mutates the selected issue immediately.
+fn render_edit_menu_overlay(f: &mut Frame, menu: EditMenu) {
     let area = Rect {
         x: 0,
         y: f.area().height.saturating_sub(4),
@@ -2825,38 +2955,27 @@ fn render_which_key_overlay(f: &mut Frame, ctx: WhichKeyContext) {
     // Clear the background
     f.render_widget(Clear, area);
 
-    let items = match ctx {
-        WhichKeyContext::Status => vec![
-            ("1", "Toggle Open"),
-            ("2", "Toggle In Progress"),
-            ("3", "Toggle Blocked"),
-            ("c", "Toggle Closed"),
-            ("r", "Reset filters"),
-        ],
-        WhichKeyContext::Type => vec![
-            ("1", "Toggle Bug"),
-            ("2", "Toggle Feature"),
-            ("3", "Toggle Task"),
-            ("4", "Toggle Epic"),
-            ("5", "Toggle Chore"),
-            ("r", "Reset filters"),
-        ],
-        WhichKeyContext::Priority => vec![
-            ("0", "P0 Critical"),
-            ("1", "P1 High"),
-            ("2", "P2 Medium"),
-            ("3", "P3 Low"),
-            ("4", "P4 Backlog"),
-            ("r", "Reset filters"),
-        ],
-        WhichKeyContext::Labels => vec![("r", "Reset filters")],
-    };
-
-    let title = match ctx {
-        WhichKeyContext::Status => "Status Filter",
-        WhichKeyContext::Type => "Type Filter",
-        WhichKeyContext::Priority => "Priority Filter",
-        WhichKeyContext::Labels => "Label Filter",
+    let (title, items) = match menu {
+        EditMenu::Priority => (
+            "Set Priority",
+            vec![
+                ("0", "Critical"),
+                ("1", "High"),
+                ("2", "Medium"),
+                ("3", "Low"),
+                ("4", "Backlog"),
+            ],
+        ),
+        EditMenu::Type => (
+            "Set Type",
+            vec![
+                ("1", "Bug"),
+                ("2", "Feature"),
+                ("3", "Task"),
+                ("4", "Epic"),
+                ("5", "Chore"),
+            ],
+        ),
     };
 
     let mut spans = vec![Span::styled(
@@ -2865,13 +2984,13 @@ fn render_which_key_overlay(f: &mut Frame, ctx: WhichKeyContext) {
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
     )];
-
     for (key, label) in items {
         spans.push(Span::styled(
             format!("[{}] {} | ", key, label),
             Style::default(),
         ));
     }
+    spans.push(Span::styled("[Esc] cancel", secondary_style()));
 
     let paragraph = Paragraph::new(Line::from(spans))
         .block(
@@ -2881,6 +3000,62 @@ fn render_which_key_overlay(f: &mut Frame, ctx: WhichKeyContext) {
                 .style(Style::default().bg(Color::Black)),
         )
         .alignment(Alignment::Left);
+
+    f.render_widget(paragraph, area);
+}
+
+/// Single-line free-text inline editor (labels / assignee) for the selected
+/// issue, rendered as a small centered popup.
+fn render_text_entry_overlay(f: &mut Frame, app: &App, field: TextEntry) {
+    let area = centered_rect(60, 18, f.area());
+    f.render_widget(Clear, area);
+
+    let (title, hint) = match field {
+        TextEntry::Labels => ("Edit Labels", "comma or space separated"),
+        TextEntry::Assignee => ("Edit Assignee", "empty clears the assignee"),
+    };
+
+    let issue_id = app
+        .current_issue()
+        .map(|i| i.id.clone())
+        .unwrap_or_default();
+
+    let text = vec![
+        Line::from(vec![
+            Span::styled(
+                format!("{title} "),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(issue_id, Style::default().fg(Color::Cyan)),
+        ]),
+        Line::from(Span::styled(format!("({hint})"), secondary_style())),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("> "),
+            Span::raw(app.edit_buffer.as_str()),
+            Span::raw("_"),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("[Enter]", Style::default().fg(Color::Green)),
+            Span::raw(" save  "),
+            Span::styled("[Esc]", Style::default().fg(Color::Red)),
+            Span::raw(" cancel"),
+        ]),
+    ];
+
+    let paragraph = Paragraph::new(text)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Blue))
+                .style(Style::default().bg(Color::Black))
+                .title(title),
+        )
+        .alignment(Alignment::Left)
+        .wrap(Wrap { trim: true });
 
     f.render_widget(paragraph, area);
 }
@@ -3503,6 +3678,16 @@ mod tests {
 
     fn ids(layout: &TreeLayout) -> Vec<String> {
         layout.issues.iter().map(|i| i.id.clone()).collect()
+    }
+
+    #[test]
+    fn test_parse_labels_splits_and_dedupes() {
+        assert_eq!(
+            parse_labels("backend, urgent  backend"),
+            vec!["backend".to_string(), "urgent".to_string()]
+        );
+        assert_eq!(parse_labels("  "), Vec::<String>::new());
+        assert_eq!(parse_labels("a,,b"), vec!["a".to_string(), "b".to_string()]);
     }
 
     #[test]
