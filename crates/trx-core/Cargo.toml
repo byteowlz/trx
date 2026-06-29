@@ -15,7 +15,6 @@ sha2.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 petgraph.workspace = true
-dirs.workspace = true
 
 # CRDT storage
 automerge = "0.5"
