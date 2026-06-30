@@ -5,6 +5,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use crossterm::{
+    cursor::{Hide, Show},
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event as CrosstermEvent, KeyCode, KeyEvent,
         KeyModifiers,
@@ -20,12 +21,14 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
-use std::collections::HashSet;
-use std::io;
+use std::collections::{HashMap, HashSet};
+use std::io::{self, Write as IoWrite};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, Instant};
 use trx_core::{
-    Event, EventAction, EventLog, FieldChange, Issue, IssueGraph, SessionSummary, Status, Store,
-    summarize_sessions,
+    DependencyType, Event, EventAction, EventLog, FieldChange, Issue, IssueGraph, SessionSummary,
+    Status, Store, summarize_sessions,
 };
 
 #[derive(Parser)]
@@ -134,7 +137,7 @@ fn run_tui(_workspace: Option<String>, _repo: Option<String>) -> Result<()> {
     Ok(())
 }
 
-fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> {
+fn run_app<B: Backend + IoWrite>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> {
     let mut last_tick = Instant::now();
     const TICK_RATE: Duration = Duration::from_millis(250);
 
@@ -149,7 +152,11 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
             && let CrosstermEvent::Key(key) = event::read()?
         {
             let action = parse_key_action(key);
-            if app.handle_key_action(action)? {
+            if app.mode == AppMode::Normal && action == KeyAction::Char('E') {
+                edit_current_description_external(terminal, app)?;
+            } else if app.mode == AppMode::Normal && action == KeyAction::Char('N') {
+                add_note_external(terminal, app)?;
+            } else if app.handle_key_action(action)? {
                 return Ok(());
             }
         }
@@ -161,6 +168,178 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> 
     }
 }
 
+fn edit_current_description_external<B: Backend + IoWrite>(
+    terminal: &mut Terminal<B>,
+    app: &mut App,
+) -> Result<()> {
+    let Some(issue) = app.current_issue().cloned() else {
+        app.show_status("No issue selected".to_string());
+        return Ok(());
+    };
+
+    let initial = issue.description.clone().unwrap_or_default();
+    let path = write_editor_temp_file(
+        &issue.id,
+        "description",
+        &format!(
+            "# Edit description for {} — {}\n# Lines starting with # are ignored. Save and quit to apply.\n\n{}",
+            issue.id, issue.title, initial
+        ),
+    )?;
+
+    let status = run_external_editor(terminal, &path)?;
+    if !status.success() {
+        app.show_status(format!("Editor exited with status {status}"));
+        return Ok(());
+    }
+
+    let edited = read_editor_body(&path)?;
+    let description = if edited.trim().is_empty() {
+        None
+    } else {
+        Some(edited.trim_end().to_string())
+    };
+    if description == issue.description {
+        app.show_status("No description changes".to_string());
+        return Ok(());
+    }
+
+    let mut fresh_store = Store::open()?;
+    let Some(current) = fresh_store.get(&issue.id).cloned() else {
+        app.show_status(format!("{} no longer exists", issue.id));
+        return Ok(());
+    };
+    let changed_while_editing = current.updated_at != issue.updated_at;
+    let mut updated = current;
+    updated.description = description;
+    updated.updated_at = chrono::Utc::now();
+    fresh_store.update(updated)?;
+    app.store = fresh_store;
+    app.apply_filters()?;
+    if changed_while_editing {
+        app.show_status(
+            "Issue changed while editing; applied description to latest version".to_string(),
+        );
+    } else {
+        app.show_status(format!("Updated description for {}", issue.id));
+    }
+    Ok(())
+}
+
+fn add_note_external<B: Backend + IoWrite>(
+    terminal: &mut Terminal<B>,
+    app: &mut App,
+) -> Result<()> {
+    let Some(issue) = app.current_issue().cloned() else {
+        app.show_status("No issue selected".to_string());
+        return Ok(());
+    };
+
+    let path = write_editor_temp_file(
+        &issue.id,
+        "note",
+        &format!(
+            "# Add note to {} — {}\n# Lines starting with # are ignored. Empty note cancels.\n\n",
+            issue.id, issue.title
+        ),
+    )?;
+    let status = run_external_editor(terminal, &path)?;
+    if !status.success() {
+        app.show_status(format!("Editor exited with status {status}"));
+        return Ok(());
+    }
+
+    let note = read_editor_body(&path)?.trim().to_string();
+    if note.is_empty() {
+        app.show_status("Empty note discarded".to_string());
+        return Ok(());
+    }
+
+    let mut fresh_store = Store::open()?;
+    let Some(mut updated) = fresh_store.get(&issue.id).cloned() else {
+        app.show_status(format!("{} no longer exists", issue.id));
+        return Ok(());
+    };
+    let entry = format!(
+        "{}:\n{}",
+        chrono::Utc::now().format("%Y-%m-%d %H:%M UTC"),
+        note
+    );
+    updated.notes = Some(match updated.notes {
+        Some(existing) if !existing.trim().is_empty() => {
+            format!("{}\n\n{}", existing.trim_end(), entry)
+        }
+        _ => entry,
+    });
+    updated.updated_at = chrono::Utc::now();
+    fresh_store.update(updated)?;
+    app.store = fresh_store;
+    app.apply_filters()?;
+    app.show_status(format!("Added note to {}", issue.id));
+    Ok(())
+}
+
+fn run_external_editor<B: Backend + IoWrite>(
+    terminal: &mut Terminal<B>,
+    path: &Path,
+) -> Result<std::process::ExitStatus> {
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture,
+        Show
+    )?;
+    terminal.show_cursor()?;
+
+    let result = spawn_editor(path);
+
+    execute!(
+        terminal.backend_mut(),
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        Hide
+    )?;
+    enable_raw_mode()?;
+    terminal.clear()?;
+
+    result
+}
+
+fn spawn_editor(path: &Path) -> Result<std::process::ExitStatus> {
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".to_string());
+    let mut parts = editor.split_whitespace();
+    let program = parts.next().unwrap_or("vi");
+    let mut command = Command::new(program);
+    for arg in parts {
+        command.arg(arg);
+    }
+    command.arg(path).status().map_err(Into::into)
+}
+
+fn write_editor_temp_file(issue_id: &str, kind: &str, content: &str) -> Result<PathBuf> {
+    let path = std::env::temp_dir().join(format!(
+        "trx-{issue_id}-{kind}-{}-{}.md",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    std::fs::write(&path, content)?;
+    Ok(path)
+}
+
+fn read_editor_body(path: &Path) -> Result<String> {
+    let content = std::fs::read_to_string(path)?;
+    Ok(content
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_start_matches('\n')
+        .to_string())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AppMode {
     Normal,
@@ -168,18 +347,25 @@ enum AppMode {
     Help,
     Sort,
     Filter,
-    WhichKey(WhichKeyContext),
+    EditMenu(EditMenu),
+    TextEntry(TextEntry),
     AddIssue,
     EditIssue,
     Dashboard,
 }
 
+/// Quick single-key inline editors that mutate the selected issue in place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WhichKeyContext {
-    Status,
+enum EditMenu {
     Priority,
     Type,
+}
+
+/// Free-text inline editors that mutate the selected issue in place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TextEntry {
     Labels,
+    Assignee,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -225,6 +411,147 @@ fn parse_key_action(key: KeyEvent) -> KeyAction {
     }
 }
 
+/// Parse a free-text label input into a deduplicated, order-preserving list of
+/// labels. Labels are separated by commas and/or whitespace; empty tokens are
+/// dropped.
+fn parse_labels(input: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for token in input.split(|c: char| c == ',' || c.is_whitespace()) {
+        let token = token.trim();
+        if !token.is_empty() && !out.iter().any(|l| l == token) {
+            out.push(token.to_string());
+        }
+    }
+    out
+}
+
+/// Resolve an issue's parent id for the tree view: prefer an explicit
+/// `ParentChild` dependency, otherwise fall back to the `epic.N` id-prefix
+/// convention (`trx-40mg.1` -> `trx-40mg`).
+fn resolve_parent_id(issue: &Issue) -> Option<String> {
+    if let Some(dep) = issue
+        .dependencies
+        .iter()
+        .find(|d| d.dep_type == DependencyType::ParentChild)
+    {
+        return Some(dep.depends_on_id.clone());
+    }
+    issue.id.rfind('.').map(|pos| issue.id[..pos].to_string())
+}
+
+/// A flat, render-ready tree layout: `issues` in parent-before-children order
+/// (rows hidden under a collapsed ancestor are omitted), with parallel
+/// `depth` / `has_children` / `child_count` metadata.
+struct TreeLayout {
+    issues: Vec<Issue>,
+    depth: Vec<usize>,
+    has_children: Vec<bool>,
+    child_count: Vec<usize>,
+}
+
+/// Arrange a filtered, pre-sorted issue list into a collapsible tree layout.
+///
+/// Parentage comes from [`resolve_parent_id`]; only edges where both ends are
+/// present in `issues` are honored, so a child whose parent was filtered out
+/// floats up to a root. Subtrees under an id in `collapsed` are pruned from the
+/// output but their parent still reports `has_children`/`child_count`. Sibling
+/// order follows the input order. Cycles are broken defensively so no issue is
+/// ever dropped.
+fn build_tree_layout(issues: Vec<Issue>, collapsed: &HashSet<String>) -> TreeLayout {
+    let n = issues.len();
+
+    let id_to_idx: HashMap<&str, usize> = issues
+        .iter()
+        .enumerate()
+        .map(|(i, is)| (is.id.as_str(), i))
+        .collect();
+
+    // Resolve each issue's parent index, if its parent is also present.
+    let parent_of: Vec<Option<usize>> = issues
+        .iter()
+        .map(|is| resolve_parent_id(is).and_then(|pid| id_to_idx.get(pid.as_str()).copied()))
+        .collect();
+
+    // Build child adjacency, preserving the existing sorted order.
+    let mut children: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut roots: Vec<usize> = Vec::new();
+    for (i, slot) in parent_of.iter().enumerate() {
+        match *slot {
+            Some(p) if p != i => children[p].push(i),
+            _ => roots.push(i),
+        }
+    }
+
+    // A node is hidden when any ancestor is collapsed.
+    let is_hidden = |start: usize| -> bool {
+        let mut cur = parent_of[start];
+        let mut steps = 0;
+        while let Some(p) = cur {
+            if steps > n {
+                break; // cycle guard
+            }
+            if collapsed.contains(&issues[p].id) {
+                return true;
+            }
+            cur = parent_of[p];
+            steps += 1;
+        }
+        false
+    };
+
+    // Depth-first emit, pruning collapsed subtrees.
+    let mut order: Vec<usize> = Vec::with_capacity(n);
+    let mut depth: Vec<usize> = Vec::with_capacity(n);
+    let mut visited = vec![false; n];
+    let mut stack: Vec<(usize, usize)> = roots.iter().rev().map(|&r| (r, 0usize)).collect();
+    while let Some((idx, d)) = stack.pop() {
+        if visited[idx] {
+            continue;
+        }
+        visited[idx] = true;
+        order.push(idx);
+        depth.push(d);
+        if !collapsed.contains(&issues[idx].id) {
+            for &k in children[idx].iter().rev() {
+                if !visited[k] {
+                    stack.push((k, d + 1));
+                }
+            }
+        }
+    }
+    // Cycle fallback: surface any still-unvisited rows that aren't hidden by a
+    // collapse, so issues never silently disappear.
+    #[allow(clippy::needless_range_loop)]
+    for i in 0..n {
+        if !visited[i] && !is_hidden(i) {
+            order.push(i);
+            depth.push(0);
+            visited[i] = true;
+        }
+    }
+
+    let mut slots: Vec<Option<Issue>> = issues.into_iter().map(Some).collect();
+    let mut out_issues = Vec::with_capacity(order.len());
+    let mut out_depth = Vec::with_capacity(order.len());
+    let mut out_has = Vec::with_capacity(order.len());
+    let mut out_count = Vec::with_capacity(order.len());
+    for (k, &idx) in order.iter().enumerate() {
+        if let Some(is) = slots[idx].take() {
+            out_issues.push(is);
+            out_depth.push(depth[k]);
+            out_has.push(!children[idx].is_empty());
+            out_count.push(children[idx].len());
+        }
+    }
+
+    TreeLayout {
+        issues: out_issues,
+        depth: out_depth,
+        has_children: out_has,
+        child_count: out_count,
+    }
+}
+
 struct App {
     filtered_issues: Vec<Issue>,
     mode: AppMode,
@@ -242,6 +569,12 @@ struct App {
 
     issue_form: IssueForm,
 
+    /// Scratch buffer for free-text inline editors (labels, assignee).
+    edit_buffer: String,
+    /// Whether the right detail pane is shown. When off, the list/tree takes
+    /// the full width regardless of terminal size.
+    show_detail: bool,
+
     // Event log + visualizations.
     events: Vec<Event>,
     sessions: Vec<SessionSummary>,
@@ -251,6 +584,15 @@ struct App {
     verbose_ctx: bool,
     follow: bool,
     follow_counter: u32,
+
+    // Nested tree view of epics / parents and their children.
+    tree_view: bool,
+    /// Parent issue IDs whose children are currently folded away.
+    collapsed: HashSet<String>,
+    /// Per-row tree metadata, parallel to `filtered_issues`.
+    row_depth: Vec<usize>,
+    row_has_children: Vec<bool>,
+    row_child_count: Vec<usize>,
 }
 
 /// Which list the middle pane shows.
@@ -434,7 +776,9 @@ impl FilterState {
             return false;
         }
 
-        if !self.enabled_statuses.contains(&issue.status) {
+        if !(self.enabled_statuses.contains(&issue.status)
+            || self.show_closed && issue.status == Status::Closed)
+        {
             return false;
         }
 
@@ -489,6 +833,8 @@ impl App {
             status_message: None,
             status_message_time: None,
             issue_form: IssueForm::new(),
+            edit_buffer: String::new(),
+            show_detail: true,
             events: Vec::new(),
             sessions: Vec::new(),
             session_selection: SelectionState::new(),
@@ -497,6 +843,11 @@ impl App {
             verbose_ctx: false,
             follow: false,
             follow_counter: 0,
+            tree_view: true,
+            collapsed: HashSet::new(),
+            row_depth: Vec::new(),
+            row_has_children: Vec::new(),
+            row_child_count: Vec::new(),
         };
 
         app.apply_filters()?;
@@ -571,12 +922,115 @@ impl App {
                 .then_with(|| b.created_at.cmp(&a.created_at))
         });
 
+        if self.tree_view {
+            self.arrange_tree();
+        } else {
+            let n = self.filtered_issues.len();
+            self.row_depth = vec![0; n];
+            self.row_has_children = vec![false; n];
+            self.row_child_count = vec![0; n];
+        }
+
         let max = self.filtered_issues.len();
         if self.selection.index >= max {
             self.selection.index = max.saturating_sub(1);
         }
 
         self.show_status(format!("Showing {} issues", self.filtered_issues.len()));
+        Ok(())
+    }
+
+    /// Reorder `filtered_issues` into a parent-before-children depth-first
+    /// layout, dropping rows hidden under a collapsed ancestor, and fill the
+    /// parallel `row_*` metadata used by the renderer. Parentage is resolved
+    /// from an explicit `ParentChild` dependency, falling back to the
+    /// `epic.N` id-prefix convention. Only edges where both ends survived the
+    /// active filters are honored; everything else floats up to a root.
+    fn arrange_tree(&mut self) {
+        let issues = std::mem::take(&mut self.filtered_issues);
+        let layout = build_tree_layout(issues, &self.collapsed);
+        self.filtered_issues = layout.issues;
+        self.row_depth = layout.depth;
+        self.row_has_children = layout.has_children;
+        self.row_child_count = layout.child_count;
+        // Positional multi-select indices no longer line up after a reorder.
+        self.selection.selected_indices.clear();
+    }
+
+    /// Toggle the fold state of the parent under the cursor and keep the
+    /// cursor anchored to it across the rebuild.
+    fn toggle_fold(&mut self) -> Result<()> {
+        if !self.tree_view || self.middle_view != MiddleView::Issues {
+            return Ok(());
+        }
+        let idx = self.selection.index;
+        if !self.row_has_children.get(idx).copied().unwrap_or(false) {
+            return Ok(());
+        }
+        let id = self.filtered_issues[idx].id.clone();
+        if !self.collapsed.remove(&id) {
+            self.collapsed.insert(id.clone());
+        }
+        self.rebuild_anchored(&id)
+    }
+
+    /// Left/`h`: collapse the current parent if expanded, otherwise hop up to
+    /// the parent row.
+    fn collapse_or_ascend(&mut self) -> Result<()> {
+        if !self.tree_view || self.middle_view != MiddleView::Issues {
+            return Ok(());
+        }
+        let idx = self.selection.index;
+        let has_children = self.row_has_children.get(idx).copied().unwrap_or(false);
+        let id = match self.filtered_issues.get(idx) {
+            Some(is) => is.id.clone(),
+            None => return Ok(()),
+        };
+        if has_children && !self.collapsed.contains(&id) {
+            self.collapsed.insert(id.clone());
+            return self.rebuild_anchored(&id);
+        }
+        // Jump to the nearest ancestor row above the cursor.
+        let depth = self.row_depth.get(idx).copied().unwrap_or(0);
+        if depth > 0 {
+            for j in (0..idx).rev() {
+                if self.row_depth[j] < depth {
+                    self.selection.index = j;
+                    self.selection.adjust_offset(0);
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Right/`l`: expand the current parent if collapsed, otherwise step down
+    /// into the subtree.
+    fn expand_or_descend(&mut self) -> Result<()> {
+        if !self.tree_view || self.middle_view != MiddleView::Issues {
+            return Ok(());
+        }
+        let idx = self.selection.index;
+        let has_children = self.row_has_children.get(idx).copied().unwrap_or(false);
+        let id = match self.filtered_issues.get(idx) {
+            Some(is) => is.id.clone(),
+            None => return Ok(()),
+        };
+        if has_children && self.collapsed.contains(&id) {
+            self.collapsed.remove(&id);
+            return self.rebuild_anchored(&id);
+        }
+        self.selection.next(self.filtered_issues.len(), 20);
+        Ok(())
+    }
+
+    /// Re-run filtering/arrangement, then restore the cursor to `anchor_id`.
+    fn rebuild_anchored(&mut self, anchor_id: &str) -> Result<()> {
+        self.apply_filters()?;
+        if let Some(pos) = self.filtered_issues.iter().position(|i| i.id == anchor_id) {
+            self.selection.index = pos;
+            self.selection.adjust_offset(0);
+        }
         Ok(())
     }
 
@@ -587,7 +1041,8 @@ impl App {
             AppMode::Help => self.handle_help_mode(action),
             AppMode::Sort => self.handle_sort_mode(action),
             AppMode::Filter => self.handle_filter_mode(action),
-            AppMode::WhichKey(ctx) => self.handle_which_key_mode(ctx, action),
+            AppMode::EditMenu(menu) => self.handle_edit_menu_mode(menu, action),
+            AppMode::TextEntry(field) => self.handle_text_entry_mode(field, action),
             AppMode::AddIssue => self.handle_add_issue_mode(action),
             AppMode::EditIssue => self.handle_edit_issue_mode(action),
             AppMode::Dashboard => self.handle_dashboard_mode(action),
@@ -647,6 +1102,23 @@ impl App {
                 MiddleView::Issues => self.selection.page_up(),
                 MiddleView::Sessions => self.session_selection.page_up(),
             },
+            KeyAction::Left => {
+                let _ = self.collapse_or_ascend();
+            }
+            KeyAction::Right => {
+                let _ = self.expand_or_descend();
+            }
+            KeyAction::Char('z') => {
+                let _ = self.toggle_fold();
+            }
+            KeyAction::Char('Z') => {
+                self.tree_view = !self.tree_view;
+                self.apply_filters()?;
+                self.show_status(format!(
+                    "Tree: {}",
+                    if self.tree_view { "nested" } else { "flat" }
+                ));
+            }
             KeyAction::Char('g') => {
                 if self.g_prefix {
                     self.selection.top();
@@ -774,13 +1246,33 @@ impl App {
                 self.show_status("Dashboard — press D or Esc to exit".to_string());
             }
             KeyAction::Char('t') => {
-                self.mode = AppMode::WhichKey(WhichKeyContext::Type);
+                if self.current_issue().is_some() {
+                    self.mode = AppMode::EditMenu(EditMenu::Type);
+                }
             }
             KeyAction::Char('p') => {
-                self.mode = AppMode::WhichKey(WhichKeyContext::Priority);
+                if self.current_issue().is_some() {
+                    self.mode = AppMode::EditMenu(EditMenu::Priority);
+                }
             }
-            KeyAction::Char('l') => {
-                self.mode = AppMode::WhichKey(WhichKeyContext::Labels);
+            KeyAction::Char('m') => {
+                if let Some(issue) = self.current_issue() {
+                    self.edit_buffer = issue.assignee.clone().unwrap_or_default();
+                    self.mode = AppMode::TextEntry(TextEntry::Assignee);
+                }
+            }
+            KeyAction::Char('L') => {
+                if let Some(issue) = self.current_issue() {
+                    self.edit_buffer = issue.labels.join(", ");
+                    self.mode = AppMode::TextEntry(TextEntry::Labels);
+                }
+            }
+            KeyAction::Tab => {
+                self.show_detail = !self.show_detail;
+                self.show_status(format!(
+                    "Detail pane: {}",
+                    if self.show_detail { "shown" } else { "hidden" }
+                ));
             }
             KeyAction::Char('f') => {
                 self.mode = AppMode::Filter;
@@ -928,78 +1420,146 @@ impl App {
         self.mode = AppMode::Normal;
     }
 
-    fn handle_which_key_mode(&mut self, ctx: WhichKeyContext, action: KeyAction) -> Result<bool> {
+    /// Quick single-key editor menu (priority / type) that mutates the
+    /// selected issue and returns to normal mode.
+    fn handle_edit_menu_mode(&mut self, menu: EditMenu, action: KeyAction) -> Result<bool> {
+        let KeyAction::Char(c) = action else {
+            if action == KeyAction::Escape {
+                self.mode = AppMode::Normal;
+            }
+            return Ok(false);
+        };
+        let applied = match menu {
+            EditMenu::Priority => match c.to_digit(10) {
+                Some(d) if d <= 4 => {
+                    self.set_priority(d as u8)?;
+                    true
+                }
+                _ => false,
+            },
+            EditMenu::Type => {
+                let t = match c {
+                    '1' => Some(trx_core::IssueType::Bug),
+                    '2' => Some(trx_core::IssueType::Feature),
+                    '3' => Some(trx_core::IssueType::Task),
+                    '4' => Some(trx_core::IssueType::Epic),
+                    '5' => Some(trx_core::IssueType::Chore),
+                    _ => None,
+                };
+                match t {
+                    Some(t) => {
+                        self.set_type(t)?;
+                        true
+                    }
+                    None => false,
+                }
+            }
+        };
+        if applied {
+            self.mode = AppMode::Normal;
+        }
+        Ok(false)
+    }
+
+    /// Free-text editor (labels / assignee) for the selected issue.
+    fn handle_text_entry_mode(&mut self, field: TextEntry, action: KeyAction) -> Result<bool> {
         match action {
             KeyAction::Escape => {
                 self.mode = AppMode::Normal;
+                self.edit_buffer.clear();
             }
-            KeyAction::Char('1') => match ctx {
-                WhichKeyContext::Status => {
-                    self.toggle_status_filter(Status::Open);
+            KeyAction::Enter => {
+                match field {
+                    TextEntry::Labels => self.apply_labels_input()?,
+                    TextEntry::Assignee => self.apply_assignee_input()?,
                 }
-                WhichKeyContext::Type => {
-                    self.toggle_type_filter(trx_core::IssueType::Bug);
-                }
-                WhichKeyContext::Priority => {
-                    self.set_priority_filter(0);
-                }
-                _ => {}
-            },
-            KeyAction::Char('2') => match ctx {
-                WhichKeyContext::Status => {
-                    self.toggle_status_filter(Status::InProgress);
-                }
-                WhichKeyContext::Type => {
-                    self.toggle_type_filter(trx_core::IssueType::Feature);
-                }
-                WhichKeyContext::Priority => {
-                    self.set_priority_filter(1);
-                }
-                _ => {}
-            },
-            KeyAction::Char('3') => match ctx {
-                WhichKeyContext::Status => {
-                    self.toggle_status_filter(Status::Blocked);
-                }
-                WhichKeyContext::Type => {
-                    self.toggle_type_filter(trx_core::IssueType::Task);
-                }
-                WhichKeyContext::Priority => {
-                    self.set_priority_filter(2);
-                }
-                _ => {}
-            },
-            KeyAction::Char('4') => match ctx {
-                WhichKeyContext::Type => {
-                    self.toggle_type_filter(trx_core::IssueType::Epic);
-                }
-                WhichKeyContext::Priority => {
-                    self.set_priority_filter(3);
-                }
-                _ => {}
-            },
-            KeyAction::Char('5') => match ctx {
-                WhichKeyContext::Type => {
-                    self.toggle_type_filter(trx_core::IssueType::Chore);
-                }
-                WhichKeyContext::Priority => {
-                    self.set_priority_filter(4);
-                }
-                _ => {}
-            },
-            KeyAction::Char('c') if ctx == WhichKeyContext::Status => {
-                self.filter_state.show_closed = !self.filter_state.show_closed;
-                self.apply_filters()?;
                 self.mode = AppMode::Normal;
+                self.edit_buffer.clear();
             }
-            KeyAction::Char('r') => {
-                self.apply_filters()?;
-                self.mode = AppMode::Normal;
+            KeyAction::Backspace => {
+                self.edit_buffer.pop();
             }
+            // Space arrives as ToggleSelect from the shared key parser; in a
+            // text field it should type a literal space.
+            KeyAction::ToggleSelect => self.edit_buffer.push(' '),
+            KeyAction::Char(c) => self.edit_buffer.push(c),
             _ => {}
         }
-
         Ok(false)
+    }
+
+    /// Set the selected issue's priority, keeping the cursor anchored across
+    /// the re-sort that a priority change triggers.
+    fn set_priority(&mut self, priority: u8) -> Result<()> {
+        let Some(issue) = self.current_issue() else {
+            return Ok(());
+        };
+        let id = issue.id.clone();
+        if issue.priority == priority {
+            self.show_status(format!("{} already P{}", id, priority));
+            return Ok(());
+        }
+        let mut updated = issue.clone();
+        updated.priority = priority;
+        updated.updated_at = chrono::Utc::now();
+        self.store.update(updated)?;
+        self.rebuild_anchored(&id)?;
+        self.show_status(format!("{} → P{}", id, priority));
+        Ok(())
+    }
+
+    /// Set the selected issue's type.
+    fn set_type(&mut self, issue_type: trx_core::IssueType) -> Result<()> {
+        let Some(issue) = self.current_issue() else {
+            return Ok(());
+        };
+        let id = issue.id.clone();
+        let mut updated = issue.clone();
+        updated.issue_type = issue_type;
+        updated.updated_at = chrono::Utc::now();
+        self.store.update(updated)?;
+        self.rebuild_anchored(&id)?;
+        self.show_status(format!("{} type → {}", id, issue_type));
+        Ok(())
+    }
+
+    /// Replace the selected issue's labels from the comma/space-separated
+    /// `edit_buffer`.
+    fn apply_labels_input(&mut self) -> Result<()> {
+        let Some(issue) = self.current_issue() else {
+            return Ok(());
+        };
+        let id = issue.id.clone();
+        let labels = parse_labels(&self.edit_buffer);
+        let mut updated = issue.clone();
+        updated.labels = labels;
+        updated.updated_at = chrono::Utc::now();
+        self.store.update(updated)?;
+        self.rebuild_anchored(&id)?;
+        self.show_status(format!("Updated labels for {}", id));
+        Ok(())
+    }
+
+    /// Set or clear the selected issue's assignee from `edit_buffer` (empty
+    /// clears it).
+    fn apply_assignee_input(&mut self) -> Result<()> {
+        let Some(issue) = self.current_issue() else {
+            return Ok(());
+        };
+        let id = issue.id.clone();
+        let trimmed = self.edit_buffer.trim();
+        let assignee = (!trimmed.is_empty()).then(|| trimmed.to_string());
+        let mut updated = issue.clone();
+        let msg = match &assignee {
+            Some(a) => format!("{} assigned to {}", id, a),
+            None => format!("{} unassigned", id),
+        };
+        updated.assignee = assignee;
+        updated.updated_at = chrono::Utc::now();
+        self.store.update(updated)?;
+        self.rebuild_anchored(&id)?;
+        self.show_status(msg);
+        Ok(())
     }
 
     fn toggle_status_filter(&mut self, status: Status) {
@@ -1018,12 +1578,6 @@ impl App {
             self.filter_state.enabled_types.insert(itype);
         }
         self.apply_filters().ok();
-    }
-
-    fn set_priority_filter(&mut self, priority: u8) {
-        self.filtered_issues.retain(|i| i.priority == priority);
-        self.show_status(format!("Filtered to P{}", priority));
-        self.mode = AppMode::Normal;
     }
 
     fn sort_by_priority(&mut self) {
@@ -1359,23 +1913,45 @@ fn ui(f: &mut Frame, app: &mut App) {
         return;
     }
 
-    let content_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(20),
-            Constraint::Percentage(40),
-            Constraint::Percentage(40),
-        ])
+    let app_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(0)].as_ref())
         .split(main_chunks[0]);
+    render_view_bar(f, app, app_chunks[0]);
 
-    render_left_pane(f, app, content_chunks[0]);
-    match app.middle_view {
-        MiddleView::Issues => render_middle_pane(f, app, content_chunks[1]),
-        MiddleView::Sessions => render_sessions_pane(f, app, content_chunks[1]),
-    }
-    match app.detail_view {
-        DetailView::Issue => render_right_pane(f, app, content_chunks[2]),
-        DetailView::Activity => render_activity_pane(f, app, content_chunks[2]),
+    if !app.show_detail {
+        // Detail pane collapsed: the list/tree gets the full width.
+        match app.middle_view {
+            MiddleView::Issues => render_middle_pane(f, app, app_chunks[1]),
+            MiddleView::Sessions => render_sessions_pane(f, app, app_chunks[1]),
+        }
+    } else if size.width < 90 {
+        match app.detail_view {
+            DetailView::Issue if app.middle_view == MiddleView::Issues => {
+                render_right_pane(f, app, app_chunks[1]);
+            }
+            DetailView::Activity => render_activity_pane(f, app, app_chunks[1]),
+            _ => render_middle_pane(f, app, app_chunks[1]),
+        }
+    } else {
+        let list_width = if size.width >= 150 {
+            72
+        } else {
+            size.width / 2
+        };
+        let content_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(list_width), Constraint::Min(30)].as_ref())
+            .split(app_chunks[1]);
+
+        match app.middle_view {
+            MiddleView::Issues => render_middle_pane(f, app, content_chunks[0]),
+            MiddleView::Sessions => render_sessions_pane(f, app, content_chunks[0]),
+        }
+        match app.detail_view {
+            DetailView::Issue => render_right_pane(f, app, content_chunks[1]),
+            DetailView::Activity => render_activity_pane(f, app, content_chunks[1]),
+        }
     }
     render_status_bar(f, app, main_chunks[1]);
 
@@ -1383,86 +1959,129 @@ fn ui(f: &mut Frame, app: &mut App) {
         AppMode::Help => render_help_overlay(f),
         AppMode::Sort => render_sort_overlay(f),
         AppMode::Filter => render_filter_overlay(f, app),
-        AppMode::WhichKey(ctx) => render_which_key_overlay(f, *ctx),
+        AppMode::EditMenu(menu) => render_edit_menu_overlay(f, *menu),
+        AppMode::TextEntry(field) => render_text_entry_overlay(f, app, *field),
         AppMode::AddIssue => render_issue_form(f, app, "Add Issue"),
         AppMode::EditIssue => render_issue_form(f, app, "Edit Issue"),
         _ => {}
     }
 }
 
-fn render_left_pane(f: &mut Frame, app: &App, area: Rect) {
-    let mut items = vec![
-        ListItem::new(Line::from(vec![Span::styled(
-            "Filters",
-            Style::default().add_modifier(Modifier::BOLD),
-        )])),
-        ListItem::new(""),
-    ];
+fn render_view_bar(f: &mut Frame, app: &App, area: Rect) {
+    let counts = ViewCounts::from_app(app);
+    let active_style = Style::default()
+        .fg(Color::Black)
+        .bg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let normal_style = Style::default().fg(Color::Gray);
+    let warn_style = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
 
-    items.push(ListItem::new(Line::from(vec![
-        Span::styled("[f]", Style::default().fg(Color::Cyan)),
-        Span::raw(" Status filters"),
-    ])));
-
-    for status in [Status::Open, Status::InProgress, Status::Blocked] {
-        let enabled = app.filter_state.enabled_statuses.contains(&status);
-        let prefix = if enabled { "[x]" } else { "[ ]" };
-        items.push(ListItem::new(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(prefix, Style::default()),
-            Span::raw(format!(" {}", status)),
-        ])));
+    let mut spans = vec![Span::raw(" ")];
+    for (idx, (label, count, hotkey)) in [
+        ("Ready", counts.ready, "r"),
+        ("Open", counts.open, "o"),
+        ("Blocked", counts.blocked, "b"),
+        ("Mine", counts.mine, "m"),
+        ("Recent", counts.recent, "u"),
+        ("Epics", counts.epics, "e"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if idx > 0 {
+            spans.push(Span::styled(" │ ", secondary_style()));
+        }
+        let style = if view_matches(app, label) {
+            active_style
+        } else if label == "Blocked" && count > 0 {
+            warn_style
+        } else {
+            normal_style
+        };
+        spans.push(Span::styled(format!(" {hotkey}:{label} {count} "), style));
     }
+    spans.push(Span::styled(" │ ", secondary_style()));
+    spans.push(Span::styled(
+        " / search  f filters  p prio  t type  L labels  m assignee  Tab fullscreen  S sessions  E edit  ? help ",
+        secondary_style(),
+    ));
 
-    if app.filter_state.show_closed {
-        items.push(ListItem::new(Line::from(vec![
-            Span::raw("  "),
-            Span::styled("[x]", Style::default()),
-            Span::raw(" Closed"),
-        ])));
+    let title = if app.follow {
+        "Views  ● follow"
+    } else {
+        "Views"
+    };
+    let paragraph = Paragraph::new(Line::from(spans)).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Blue))
+            .title(title),
+    );
+    f.render_widget(paragraph, area);
+}
+
+struct ViewCounts {
+    ready: usize,
+    open: usize,
+    blocked: usize,
+    mine: usize,
+    recent: usize,
+    epics: usize,
+}
+
+impl ViewCounts {
+    fn from_app(app: &App) -> Self {
+        let issues = app.store.list(false);
+        let graph = IssueGraph::from_issues(&issues);
+        let ready_ids: HashSet<&str> = graph
+            .ready_issues(&issues)
+            .iter()
+            .map(|i| i.id.as_str())
+            .collect();
+        let open = issues.iter().filter(|i| i.status.is_open()).count();
+        let blocked = issues
+            .iter()
+            .filter(|i| i.status == Status::Blocked)
+            .count();
+        let mine = issues.iter().filter(|i| i.assignee.is_some()).count();
+        let epics = issues
+            .iter()
+            .filter(|i| i.issue_type == trx_core::IssueType::Epic && i.status.is_open())
+            .count();
+        let recent = issues
+            .iter()
+            .filter(|i| {
+                chrono::Utc::now()
+                    .signed_duration_since(i.updated_at)
+                    .num_days()
+                    <= 7
+            })
+            .count();
+        Self {
+            ready: issues
+                .iter()
+                .filter(|i| ready_ids.contains(i.id.as_str()))
+                .count(),
+            open,
+            blocked,
+            mine,
+            recent,
+            epics,
+        }
     }
+}
 
-    items.push(ListItem::new(""));
-
-    items.push(ListItem::new(Line::from(vec![
-        Span::styled("[t]", Style::default().fg(Color::Cyan)),
-        Span::raw(" Type filters"),
-    ])));
-
-    for itype in [
-        trx_core::IssueType::Bug,
-        trx_core::IssueType::Feature,
-        trx_core::IssueType::Task,
-        trx_core::IssueType::Epic,
-        trx_core::IssueType::Chore,
-    ] {
-        let enabled = app.filter_state.enabled_types.contains(&itype);
-        let prefix = if enabled { "[x]" } else { "[ ]" };
-        items.push(ListItem::new(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(prefix, Style::default()),
-            Span::raw(format!(" {}", itype)),
-        ])));
+fn view_matches(app: &App, label: &str) -> bool {
+    match label {
+        "Ready" => app.filter_state.ready_only,
+        "Open" => app.filter_state.enabled_statuses.contains(&Status::Open),
+        "Blocked" => app.filter_state.enabled_statuses.contains(&Status::Blocked),
+        "Epics" => app
+            .filter_state
+            .enabled_types
+            .contains(&trx_core::IssueType::Epic),
+        _ => false,
     }
-
-    if app.filter_state.ready_only {
-        items.push(ListItem::new(""));
-        items.push(ListItem::new(Line::from(vec![
-            Span::styled("[r]", Style::default().fg(Color::Yellow)),
-            Span::raw(" Ready only"),
-        ])));
-    }
-
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Blue))
-                .title("Navigation"),
-        )
-        .highlight_style(Style::default().bg(Color::DarkGray));
-
-    f.render_widget(list, area);
 }
 
 fn render_middle_pane(f: &mut Frame, app: &mut App, area: Rect) {
@@ -1478,8 +2097,8 @@ fn render_middle_pane(f: &mut Frame, app: &mut App, area: Rect) {
                 Status::Open => Style::default().fg(Color::Green),
                 Status::InProgress => Style::default().fg(Color::Yellow),
                 Status::Blocked => Style::default().fg(Color::Red),
-                Status::Closed => Style::default().fg(Color::DarkGray),
-                Status::Tombstone => Style::default().fg(Color::DarkGray),
+                Status::Closed => secondary_style(),
+                Status::Tombstone => secondary_style(),
             };
 
             let priority_color = match issue.priority {
@@ -1505,8 +2124,38 @@ fn render_middle_pane(f: &mut Frame, app: &mut App, area: Rect) {
                 prefix = "> ".to_string();
             }
 
+            // Tree indentation + fold marker (only in nested mode).
+            let tree_prefix = if app.tree_view {
+                let depth = app.row_depth.get(idx).copied().unwrap_or(0);
+                let has_children = app.row_has_children.get(idx).copied().unwrap_or(false);
+                let indent = "  ".repeat(depth);
+                let marker = if has_children {
+                    if app.collapsed.contains(&issue.id) {
+                        "▸ "
+                    } else {
+                        "▾ "
+                    }
+                } else {
+                    "  "
+                };
+                format!("{indent}{marker}")
+            } else {
+                String::new()
+            };
+
+            // Show how many children are hidden behind a collapsed parent.
+            let count_suffix = if app.tree_view
+                && app.collapsed.contains(&issue.id)
+                && app.row_child_count.get(idx).copied().unwrap_or(0) > 0
+            {
+                format!(" ({})", app.row_child_count[idx])
+            } else {
+                String::new()
+            };
+
             let content = Line::from(vec![
                 Span::styled(prefix, Style::default()),
+                Span::styled(tree_prefix, secondary_style()),
                 Span::styled(issue.id.clone(), Style::default().fg(Color::Cyan)),
                 Span::raw(" "),
                 Span::styled(
@@ -1521,6 +2170,7 @@ fn render_middle_pane(f: &mut Frame, app: &mut App, area: Rect) {
                 ),
                 Span::styled(format!("{} ", issue.status), status_style),
                 Span::styled(title, Style::default()),
+                Span::styled(count_suffix, secondary_style()),
             ]);
 
             ListItem::new(content)
@@ -1532,7 +2182,11 @@ fn render_middle_pane(f: &mut Frame, app: &mut App, area: Rect) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Blue))
-                .title(format!("Issues ({})", app.filtered_issues.len())),
+                .title(format!(
+                    "Issues ({}){}",
+                    app.filtered_issues.len(),
+                    if app.tree_view { " [tree]" } else { "" }
+                )),
         )
         .highlight_style(
             Style::default()
@@ -1555,8 +2209,8 @@ fn render_right_pane(f: &mut Frame, app: &mut App, area: Rect) {
             Status::Open => Style::default().fg(Color::Green),
             Status::InProgress => Style::default().fg(Color::Yellow),
             Status::Blocked => Style::default().fg(Color::Red),
-            Status::Closed => Style::default().fg(Color::DarkGray),
-            Status::Tombstone => Style::default().fg(Color::DarkGray),
+            Status::Closed => secondary_style(),
+            Status::Tombstone => secondary_style(),
         };
 
         let priority_text = match issue.priority {
@@ -1716,6 +2370,87 @@ fn session_name_display(s: &SessionSummary) -> Option<String> {
     Some(n.to_string())
 }
 
+fn session_display_name(s: &SessionSummary) -> String {
+    if let Some(name) = session_name_display(s) {
+        return name;
+    }
+    if s.session_id == "-" {
+        return "Unattributed events".to_string();
+    }
+    short_session_id(&s.session_id)
+}
+
+fn short_session_id(id: &str) -> String {
+    if id == "-" {
+        "-".to_string()
+    } else if id.len() > 18 {
+        format!("{}…{}", &id[..8], &id[id.len() - 6..])
+    } else {
+        id.to_string()
+    }
+}
+
+fn session_actor_line(s: &SessionSummary) -> String {
+    let user = s
+        .user_id
+        .as_deref()
+        .filter(|v| !v.is_empty())
+        .unwrap_or("unknown user");
+    let runtime = s
+        .harness
+        .as_deref()
+        .or(s.platform.as_deref())
+        .filter(|v| !v.is_empty())
+        .unwrap_or("unknown runtime");
+    let model = s
+        .model
+        .as_deref()
+        .filter(|v| !v.is_empty())
+        .unwrap_or("unknown model");
+    format!("{} · {} · {}", user, runtime, model)
+}
+
+fn session_action_summary(events: &[&Event]) -> String {
+    let created = events
+        .iter()
+        .filter(|e| e.action == EventAction::Created)
+        .count();
+    let updated = events
+        .iter()
+        .filter(|e| e.action == EventAction::Updated)
+        .count();
+    let closed = events
+        .iter()
+        .filter(|e| e.action == EventAction::Closed)
+        .count();
+    let reopened = events
+        .iter()
+        .filter(|e| e.action == EventAction::Reopened)
+        .count();
+    let mut parts = Vec::new();
+    if created > 0 {
+        parts.push(format!("created {created}"));
+    }
+    if updated > 0 {
+        parts.push(format!("updated {updated}"));
+    }
+    if closed > 0 {
+        parts.push(format!("closed {closed}"));
+    }
+    if reopened > 0 {
+        parts.push(format!("reopened {reopened}"));
+    }
+    if parts.is_empty() {
+        "activity".to_string()
+    } else {
+        parts.join(" · ")
+    }
+}
+
+fn secondary_style() -> Style {
+    Style::default().fg(Color::Gray)
+}
+
 /// Compact AGENT_CTX line for an event, e.g. `claude-code · my-sess · opus-4.7`.
 fn event_ctx_compact(e: &Event) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
@@ -1763,7 +2498,7 @@ fn render_event_lines(lines: &mut Vec<Line<'static>>, e: &Event, verbose: bool) 
     let ts = e.timestamp.format("%Y-%m-%d %H:%M:%S").to_string();
     let action_str = e.action.to_string();
     lines.push(Line::from(vec![
-        Span::styled(ts, Style::default().fg(Color::DarkGray)),
+        Span::styled(ts, secondary_style()),
         Span::raw("  "),
         Span::styled(
             format!("{:<10}", action_str),
@@ -1777,33 +2512,30 @@ fn render_event_lines(lines: &mut Vec<Line<'static>>, e: &Event, verbose: bool) 
     if let Some(note) = &e.note {
         lines.push(Line::from(vec![
             Span::raw("    "),
-            Span::styled("› ", Style::default().fg(Color::DarkGray)),
+            Span::styled("› ", secondary_style()),
             Span::raw(note.clone()),
         ]));
     }
     for c in &e.changes {
         lines.push(Line::from(vec![
             Span::raw("    "),
-            Span::styled("· ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format_field_change(c), Style::default().fg(Color::DarkGray)),
+            Span::styled("· ", secondary_style()),
+            Span::styled(format_field_change(c), secondary_style()),
         ]));
     }
     if verbose {
         for (label, val) in event_ctx_verbose(e) {
             lines.push(Line::from(vec![
                 Span::raw("    "),
-                Span::styled(
-                    format!("{:<10}", format!("{}:", label)),
-                    Style::default().fg(Color::DarkGray),
-                ),
+                Span::styled(format!("{:<10}", format!("{}:", label)), secondary_style()),
                 Span::raw(" "),
-                Span::styled(val, Style::default().fg(Color::DarkGray)),
+                Span::styled(val, secondary_style()),
             ]));
         }
     } else if let Some(ctx) = event_ctx_compact(e) {
         lines.push(Line::from(vec![
             Span::raw("    "),
-            Span::styled(format!("[{}]", ctx), Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("[{}]", ctx), secondary_style()),
         ]));
     }
 }
@@ -1816,12 +2548,22 @@ fn render_sessions_pane(f: &mut Frame, app: &mut App, area: Rect) {
         .map(|(idx, s)| {
             let is_cursor = idx == app.session_selection.index;
             let prefix = if is_cursor { "> " } else { "  " };
-            let mut header_spans = vec![
+            let events: Vec<&Event> = app
+                .events
+                .iter()
+                .filter(|e| e.session_key().unwrap_or("-") == s.session_id)
+                .collect();
+            let display = session_display_name(s);
+            let header = Line::from(vec![
                 Span::raw(prefix),
                 Span::styled(
-                    s.session_id.clone(),
+                    display,
                     Style::default()
-                        .fg(Color::Cyan)
+                        .fg(if s.session_id == "-" {
+                            Color::Yellow
+                        } else {
+                            Color::Cyan
+                        })
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw("  "),
@@ -1829,39 +2571,26 @@ fn render_sessions_pane(f: &mut Frame, app: &mut App, area: Rect) {
                     format!("{} evt", s.event_count),
                     Style::default().fg(Color::Yellow),
                 ),
-            ];
-            if let Some(name) = session_name_display(s) {
-                header_spans.push(Span::raw("  "));
-                header_spans.push(Span::styled(
-                    name,
-                    Style::default()
-                        .fg(Color::Magenta)
-                        .add_modifier(Modifier::BOLD),
-                ));
-            }
-            let header = Line::from(header_spans);
-            let user = s.user_id.as_deref().unwrap_or("-");
-            let harness = s
-                .harness
-                .as_deref()
-                .or(s.platform.as_deref())
-                .unwrap_or("-");
-            let model = s.model.as_deref().unwrap_or("-");
-            let sub = Line::from(vec![
                 Span::raw("  "),
                 Span::styled(
-                    format!("{} · {} · {}", user, harness, model),
-                    Style::default().fg(Color::DarkGray),
+                    format!("{} issues", s.issue_ids.len()),
+                    Style::default().fg(Color::Magenta),
                 ),
             ]);
+            let sub = Line::from(vec![
+                Span::raw("  "),
+                Span::styled(session_actor_line(s), secondary_style()),
+            ]);
             let range = format!(
-                "{} → {}",
-                s.first_at.format("%Y-%m-%d %H:%M"),
-                s.last_at.format("%H:%M")
+                "{} → {}   {}   id: {}",
+                s.first_at.format("%b %d %H:%M"),
+                s.last_at.format("%H:%M"),
+                session_action_summary(&events),
+                short_session_id(&s.session_id)
             );
             let when = Line::from(vec![
                 Span::raw("  "),
-                Span::styled(range, Style::default().fg(Color::DarkGray)),
+                Span::styled(range, secondary_style()),
             ]);
             ListItem::new(Text::from(vec![header, sub, when]))
         })
@@ -1870,7 +2599,7 @@ fn render_sessions_pane(f: &mut Frame, app: &mut App, area: Rect) {
     let title = if app.follow {
         format!("Sessions ({})  ● follow", app.sessions.len())
     } else {
-        format!("Sessions ({})", app.sessions.len())
+        format!("Sessions ({}) — newest first", app.sessions.len())
     };
 
     let list = List::new(items)
@@ -1921,7 +2650,7 @@ fn render_activity_pane(f: &mut Frame, app: &mut App, area: Rect) {
             if events.is_empty() {
                 lines.push(Line::from(Span::styled(
                     "No events for this issue.",
-                    Style::default().fg(Color::DarkGray),
+                    secondary_style(),
                 )));
             } else {
                 for e in &events {
@@ -1933,51 +2662,82 @@ fn render_activity_pane(f: &mut Frame, app: &mut App, area: Rect) {
         MiddleView::Sessions => {
             let events = app.events_for_selected_session();
             if let Some(s) = app.current_session() {
-                title = format!("Session — {} ({} events)", s.session_id, events.len());
-                let user = s.user_id.as_deref().unwrap_or("-");
-                let harness = s
-                    .harness
-                    .as_deref()
-                    .or(s.platform.as_deref())
-                    .unwrap_or("-");
-                let model = s.model.as_deref().unwrap_or("-");
-                let mut id_spans = vec![Span::styled(
-                    s.session_id.clone(),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                )];
-                if let Some(name) = session_name_display(s) {
-                    id_spans.push(Span::raw("  "));
-                    id_spans.push(Span::styled(
-                        name,
-                        Style::default()
-                            .fg(Color::Magenta)
-                            .add_modifier(Modifier::BOLD),
-                    ));
-                }
-                lines.push(Line::from(id_spans));
+                let display = session_display_name(s);
+                title = format!("Session — {} ({} events)", display, events.len());
                 lines.push(Line::from(vec![Span::styled(
-                    format!("{} · {} · {}", user, harness, model),
-                    Style::default().fg(Color::DarkGray),
+                    display,
+                    Style::default()
+                        .fg(if s.session_id == "-" {
+                            Color::Yellow
+                        } else {
+                            Color::Cyan
+                        })
+                        .add_modifier(Modifier::BOLD),
+                )]));
+                lines.push(Line::from(vec![Span::styled(
+                    session_actor_line(s),
+                    secondary_style(),
                 )]));
                 lines.push(Line::from(vec![Span::styled(
                     format!(
-                        "{} → {}   issues: {}",
+                        "{} → {}   {} events · {} issues",
                         s.first_at.format("%Y-%m-%d %H:%M"),
-                        s.last_at.format("%H:%M"),
-                        s.issue_ids.len()
+                        s.last_at.format("%Y-%m-%d %H:%M"),
+                        s.event_count,
+                        s.issue_ids.len(),
                     ),
-                    Style::default().fg(Color::DarkGray),
+                    secondary_style(),
                 )]));
+                lines.push(Line::from(vec![
+                    Span::styled("Summary: ", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::styled(session_action_summary(&events), secondary_style()),
+                ]));
+                lines.push(Line::from(vec![
+                    Span::styled("session id: ", secondary_style()),
+                    Span::styled(s.session_id.clone(), secondary_style()),
+                ]));
+                if s.session_id == "-" {
+                    lines.push(Line::from(vec![Span::styled(
+                        "These events predate AGENT_CTX session tagging or came from tools without session metadata.",
+                        Style::default().fg(Color::Yellow),
+                    )]));
+                }
                 lines.push(Line::from(""));
+                lines.push(Line::from(vec![Span::styled(
+                    "Touched issues",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )]));
+                for issue_id in s.issue_ids.iter().take(8) {
+                    let title = app
+                        .store
+                        .get(issue_id)
+                        .map(|i| i.title.as_str())
+                        .unwrap_or("issue not in current store");
+                    lines.push(Line::from(vec![
+                        Span::raw("  • "),
+                        Span::styled(issue_id.clone(), Style::default().fg(Color::Cyan)),
+                        Span::raw("  "),
+                        Span::raw(title.to_string()),
+                    ]));
+                }
+                if s.issue_ids.len() > 8 {
+                    lines.push(Line::from(vec![Span::styled(
+                        format!("  … {} more", s.issue_ids.len() - 8),
+                        secondary_style(),
+                    )]));
+                }
+                lines.push(Line::from(""));
+                lines.push(Line::from(vec![Span::styled(
+                    "Timeline",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )]));
             } else {
                 title = "Session".to_string();
             }
             if events.is_empty() {
                 lines.push(Line::from(Span::styled(
                     "No events for this session.",
-                    Style::default().fg(Color::DarkGray),
+                    secondary_style(),
                 )));
             } else {
                 for e in &events {
@@ -2014,7 +2774,8 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
         AppMode::Help => "[HELP]",
         AppMode::Sort => "[SORT]",
         AppMode::Filter => "[FILTER]",
-        AppMode::WhichKey(_) => "[WHICHKEY]",
+        AppMode::EditMenu(_) => "[EDIT]",
+        AppMode::TextEntry(_) => "[EDIT]",
         AppMode::AddIssue => "[ADD ISSUE]",
         AppMode::EditIssue => "[EDIT ISSUE]",
         AppMode::Dashboard => "[DASHBOARD]",
@@ -2054,7 +2815,7 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
                 view_tag, detail_tag, follow_tag, selected_count
             )),
             Span::raw(
-                "[S]essions [T]imeline [v]erbose [F]ollow [a]dd [e]dit [c]lose [/]search [?]help [q]uit",
+                "[p]rio [t]ype [L]abels [m]assignee [Tab]full [a]dd [e]dit [c]lose [/]search [?]help [q]uit",
             ),
         ])
     };
@@ -2093,23 +2854,42 @@ fn render_help_overlay(f: &mut Frame) {
         Line::from("  Ctrl-a     Select all"),
         Line::from("  V          Clear selection"),
         Line::from(""),
+        Line::from("Tree (epics & children):"),
+        Line::from("  z          Fold/unfold the parent under the cursor"),
+        Line::from("  h/Left     Collapse parent, or jump to its parent"),
+        Line::from("  l/Right    Expand parent, or step into children"),
+        Line::from("  Z          Toggle nested tree ↔ flat list"),
+        Line::from(""),
         Line::from("Actions:"),
         Line::from("  a          Add issue"),
-        Line::from("  e          Edit issue"),
+        Line::from("  e          Edit issue in TUI form"),
+        Line::from("  E          Edit description in $VISUAL/$EDITOR"),
+        Line::from("  N          Add note in $VISUAL/$EDITOR"),
         Line::from("  c          Close issue"),
-        Line::from("  1-4        Set status (Open/InProgress/Blocked/Closed)"),
+        Line::from(""),
+        Line::from("Quick inline edits (selected issue):"),
+        Line::from("  1-4        Set status (1 reopens to Open, 4 closes)"),
+        Line::from("  p          Set priority (0-4)"),
+        Line::from("  t          Set type (bug/feature/task/epic/chore)"),
+        Line::from("  L          Edit labels"),
+        Line::from("  m          Set/clear assignee"),
+        Line::from(""),
         Line::from("  /          Search"),
         Line::from("  s          Sort menu"),
-        Line::from("  f          Filter menu"),
+        Line::from("  f          Filter menu; then c toggles closed issues"),
         Line::from("  r          Refresh"),
         Line::from("  ?          Help"),
         Line::from("  q          Quit"),
         Line::from("  Esc        Return to normal mode"),
         Line::from(""),
-        Line::from("Activity / events:"),
-        Line::from("  S          Toggle middle pane: Issues ↔ Sessions"),
-        Line::from("  T          Toggle right pane: Issue details ↔ Activity"),
-        Line::from("  v          Toggle verbose AGENT_CTX in activity"),
+        Line::from("Layout / activity:"),
+        Line::from("  Top bar    Persistent view counts; no wide sidebar by default"),
+        Line::from("  <90 cols   Adaptive single-pane focus on current detail/list"),
+        Line::from("  Tab        Collapse/show detail pane (full-width list)"),
+        Line::from("  S          Toggle list pane: Issues ↔ Sessions"),
+        Line::from("  T          Toggle details ↔ timeline/activity"),
+        Line::from("  v          Toggle compact/verbose session context"),
+        Line::from("  - session  Unattributed events: old/no AGENT_CTX metadata"),
         Line::from("  F          Toggle follow mode (live-tail events)"),
         Line::from("  D          Enter Dashboard (heatmap + bars + live tail)"),
     ];
@@ -2162,7 +2942,9 @@ fn render_sort_overlay(f: &mut Frame) {
     f.render_widget(paragraph, area);
 }
 
-fn render_which_key_overlay(f: &mut Frame, ctx: WhichKeyContext) {
+/// Bottom which-key style bar for the quick single-key inline editors. The
+/// chosen key mutates the selected issue immediately.
+fn render_edit_menu_overlay(f: &mut Frame, menu: EditMenu) {
     let area = Rect {
         x: 0,
         y: f.area().height.saturating_sub(4),
@@ -2173,38 +2955,27 @@ fn render_which_key_overlay(f: &mut Frame, ctx: WhichKeyContext) {
     // Clear the background
     f.render_widget(Clear, area);
 
-    let items = match ctx {
-        WhichKeyContext::Status => vec![
-            ("1", "Toggle Open"),
-            ("2", "Toggle In Progress"),
-            ("3", "Toggle Blocked"),
-            ("c", "Toggle Closed"),
-            ("r", "Reset filters"),
-        ],
-        WhichKeyContext::Type => vec![
-            ("1", "Toggle Bug"),
-            ("2", "Toggle Feature"),
-            ("3", "Toggle Task"),
-            ("4", "Toggle Epic"),
-            ("5", "Toggle Chore"),
-            ("r", "Reset filters"),
-        ],
-        WhichKeyContext::Priority => vec![
-            ("0", "P0 Critical"),
-            ("1", "P1 High"),
-            ("2", "P2 Medium"),
-            ("3", "P3 Low"),
-            ("4", "P4 Backlog"),
-            ("r", "Reset filters"),
-        ],
-        WhichKeyContext::Labels => vec![("r", "Reset filters")],
-    };
-
-    let title = match ctx {
-        WhichKeyContext::Status => "Status Filter",
-        WhichKeyContext::Type => "Type Filter",
-        WhichKeyContext::Priority => "Priority Filter",
-        WhichKeyContext::Labels => "Label Filter",
+    let (title, items) = match menu {
+        EditMenu::Priority => (
+            "Set Priority",
+            vec![
+                ("0", "Critical"),
+                ("1", "High"),
+                ("2", "Medium"),
+                ("3", "Low"),
+                ("4", "Backlog"),
+            ],
+        ),
+        EditMenu::Type => (
+            "Set Type",
+            vec![
+                ("1", "Bug"),
+                ("2", "Feature"),
+                ("3", "Task"),
+                ("4", "Epic"),
+                ("5", "Chore"),
+            ],
+        ),
     };
 
     let mut spans = vec![Span::styled(
@@ -2213,13 +2984,13 @@ fn render_which_key_overlay(f: &mut Frame, ctx: WhichKeyContext) {
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
     )];
-
     for (key, label) in items {
         spans.push(Span::styled(
             format!("[{}] {} | ", key, label),
             Style::default(),
         ));
     }
+    spans.push(Span::styled("[Esc] cancel", secondary_style()));
 
     let paragraph = Paragraph::new(Line::from(spans))
         .block(
@@ -2229,6 +3000,62 @@ fn render_which_key_overlay(f: &mut Frame, ctx: WhichKeyContext) {
                 .style(Style::default().bg(Color::Black)),
         )
         .alignment(Alignment::Left);
+
+    f.render_widget(paragraph, area);
+}
+
+/// Single-line free-text inline editor (labels / assignee) for the selected
+/// issue, rendered as a small centered popup.
+fn render_text_entry_overlay(f: &mut Frame, app: &App, field: TextEntry) {
+    let area = centered_rect(60, 18, f.area());
+    f.render_widget(Clear, area);
+
+    let (title, hint) = match field {
+        TextEntry::Labels => ("Edit Labels", "comma or space separated"),
+        TextEntry::Assignee => ("Edit Assignee", "empty clears the assignee"),
+    };
+
+    let issue_id = app
+        .current_issue()
+        .map(|i| i.id.clone())
+        .unwrap_or_default();
+
+    let text = vec![
+        Line::from(vec![
+            Span::styled(
+                format!("{title} "),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(issue_id, Style::default().fg(Color::Cyan)),
+        ]),
+        Line::from(Span::styled(format!("({hint})"), secondary_style())),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("> "),
+            Span::raw(app.edit_buffer.as_str()),
+            Span::raw("_"),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("[Enter]", Style::default().fg(Color::Green)),
+            Span::raw(" save  "),
+            Span::styled("[Esc]", Style::default().fg(Color::Red)),
+            Span::raw(" cancel"),
+        ]),
+    ];
+
+    let paragraph = Paragraph::new(text)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Blue))
+                .style(Style::default().bg(Color::Black))
+                .title(title),
+        )
+        .alignment(Alignment::Left)
+        .wrap(Wrap { trim: true });
 
     f.render_widget(paragraph, area);
 }
@@ -2577,17 +3404,11 @@ fn render_dashboard_heatmap(f: &mut Frame, app: &App, area: Rect) {
             header.push_str("  ");
         }
     }
-    lines.push(Line::from(Span::styled(
-        header,
-        Style::default().fg(Color::DarkGray),
-    )));
+    lines.push(Line::from(Span::styled(header, secondary_style())));
 
     for (row, dn) in day_names.iter().enumerate() {
         let mut spans: Vec<Span> = Vec::with_capacity(weeks * 2 + 2);
-        spans.push(Span::styled(
-            format!("{:<4} ", dn),
-            Style::default().fg(Color::DarkGray),
-        ));
+        spans.push(Span::styled(format!("{:<4} ", dn), secondary_style()));
         for w in 0..weeks {
             let d = start + ChronoDuration::days((w * 7 + row) as i64);
             if d > today {
@@ -2605,8 +3426,8 @@ fn render_dashboard_heatmap(f: &mut Frame, app: &App, area: Rect) {
     // Legend.
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
-        Span::styled("  Legend  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("·", Style::default().fg(Color::DarkGray)),
+        Span::styled("  Legend  ", secondary_style()),
+        Span::styled("·", secondary_style()),
         Span::raw(" 0   "),
         Span::styled("▒", Style::default().fg(Color::Green)),
         Span::raw(" 1–2   "),
@@ -2721,7 +3542,7 @@ fn render_dashboard_sessions(f: &mut Frame, app: &App, area: Rect) {
     if app.sessions.is_empty() {
         lines.push(Line::from(Span::styled(
             "No sessions yet.",
-            Style::default().fg(Color::DarkGray),
+            secondary_style(),
         )));
     } else {
         for s in app.sessions.iter().take(8) {
@@ -2739,7 +3560,7 @@ fn render_dashboard_sessions(f: &mut Frame, app: &App, area: Rect) {
                 ),
                 Span::raw("  "),
                 Span::styled(bar, Style::default().fg(Color::Green)),
-                Span::styled(empty, Style::default().fg(Color::DarkGray)),
+                Span::styled(empty, secondary_style()),
                 Span::raw("  "),
                 Span::styled(
                     format!("{:>3}", s.event_count),
@@ -2762,7 +3583,7 @@ fn render_dashboard_sessions(f: &mut Frame, app: &App, area: Rect) {
                 Span::raw("  "),
                 Span::styled(
                     format!("{} · {} · {}", user, harness, model),
-                    Style::default().fg(Color::DarkGray),
+                    secondary_style(),
                 ),
             ]));
             lines.push(Line::from(vec![
@@ -2774,7 +3595,7 @@ fn render_dashboard_sessions(f: &mut Frame, app: &App, area: Rect) {
                         s.last_at.format("%H:%M"),
                         s.issue_ids.len()
                     ),
-                    Style::default().fg(Color::DarkGray),
+                    secondary_style(),
                 ),
             ]));
             lines.push(Line::from(""));
@@ -2799,14 +3620,14 @@ fn render_dashboard_tail(f: &mut Frame, app: &App, area: Rect) {
     if tail.is_empty() {
         lines.push(Line::from(Span::styled(
             "No events yet.",
-            Style::default().fg(Color::DarkGray),
+            secondary_style(),
         )));
     }
     for e in tail.iter().rev() {
         let ts = e.timestamp.format("%m-%d %H:%M:%S").to_string();
         let action_str = e.action.to_string();
         let mut spans = vec![
-            Span::styled(ts, Style::default().fg(Color::DarkGray)),
+            Span::styled(ts, secondary_style()),
             Span::raw("  "),
             Span::styled(
                 format!("{:<9}", action_str),
@@ -2819,10 +3640,7 @@ fn render_dashboard_tail(f: &mut Frame, app: &App, area: Rect) {
         ];
         if let Some(c) = e.changes.first() {
             spans.push(Span::raw("  "));
-            spans.push(Span::styled(
-                format_field_change(c),
-                Style::default().fg(Color::DarkGray),
-            ));
+            spans.push(Span::styled(format_field_change(c), secondary_style()));
         } else if let Some(note) = &e.note {
             spans.push(Span::raw("  "));
             spans.push(Span::styled(note.clone(), Style::default().fg(Color::Gray)));
@@ -2841,4 +3659,130 @@ fn render_dashboard_tail(f: &mut Frame, app: &App, area: Rect) {
             .title(title),
     );
     f.render_widget(para, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use trx_core::Issue;
+
+    fn issue(id: &str) -> Issue {
+        Issue::new(id.to_string(), format!("title {id}"))
+    }
+
+    fn child(id: &str, parent: &str) -> Issue {
+        let mut i = issue(id);
+        i.add_dependency(parent.to_string(), DependencyType::ParentChild);
+        i
+    }
+
+    fn ids(layout: &TreeLayout) -> Vec<String> {
+        layout.issues.iter().map(|i| i.id.clone()).collect()
+    }
+
+    #[test]
+    fn test_parse_labels_splits_and_dedupes() {
+        assert_eq!(
+            parse_labels("backend, urgent  backend"),
+            vec!["backend".to_string(), "urgent".to_string()]
+        );
+        assert_eq!(parse_labels("  "), Vec::<String>::new());
+        assert_eq!(parse_labels("a,,b"), vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn test_parent_from_explicit_dependency() {
+        let c = child("trx-zzzz", "trx-epic");
+        assert_eq!(resolve_parent_id(&c).as_deref(), Some("trx-epic"));
+    }
+
+    #[test]
+    fn test_parent_from_id_prefix() {
+        // No dependency, but the dotted id encodes the parent.
+        assert_eq!(
+            resolve_parent_id(&issue("trx-epic.2")).as_deref(),
+            Some("trx-epic")
+        );
+        assert_eq!(
+            resolve_parent_id(&issue("trx-epic.2.1")).as_deref(),
+            Some("trx-epic.2")
+        );
+        assert_eq!(resolve_parent_id(&issue("trx-root")), None);
+    }
+
+    #[test]
+    fn test_layout_nests_children_under_parent() {
+        let issues = vec![
+            issue("trx-epic"),
+            child("trx-epic.1", "trx-epic"),
+            issue("trx-other"),
+        ];
+        let layout = build_tree_layout(issues, &HashSet::new());
+
+        assert_eq!(ids(&layout), vec!["trx-epic", "trx-epic.1", "trx-other"]);
+        assert_eq!(layout.depth, vec![0, 1, 0]);
+        assert_eq!(layout.has_children, vec![true, false, false]);
+        assert_eq!(layout.child_count, vec![1, 0, 0]);
+    }
+
+    #[test]
+    fn test_layout_id_prefix_without_dependency() {
+        // Child linked only by dotted id, no ParentChild dep.
+        let issues = vec![issue("trx-epic"), issue("trx-epic.1")];
+        let layout = build_tree_layout(issues, &HashSet::new());
+        assert_eq!(ids(&layout), vec!["trx-epic", "trx-epic.1"]);
+        assert_eq!(layout.depth, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_collapsed_parent_hides_descendants() {
+        let issues = vec![
+            issue("trx-epic"),
+            child("trx-epic.1", "trx-epic"),
+            child("trx-epic.2", "trx-epic"),
+            issue("trx-other"),
+        ];
+        let mut collapsed = HashSet::new();
+        collapsed.insert("trx-epic".to_string());
+        let layout = build_tree_layout(issues, &collapsed);
+
+        // Children of the collapsed epic are gone, but it still reports them.
+        assert_eq!(ids(&layout), vec!["trx-epic", "trx-other"]);
+        assert_eq!(layout.has_children, vec![true, false]);
+        assert_eq!(layout.child_count, vec![2, 0]);
+    }
+
+    #[test]
+    fn test_orphan_child_floats_to_root() {
+        // Parent not present in the filtered set -> child shown at depth 0.
+        let issues = vec![child("trx-epic.1", "trx-epic")];
+        let layout = build_tree_layout(issues, &HashSet::new());
+        assert_eq!(ids(&layout), vec!["trx-epic.1"]);
+        assert_eq!(layout.depth, vec![0]);
+        assert_eq!(layout.has_children, vec![false]);
+    }
+
+    #[test]
+    fn test_cycle_does_not_drop_issues() {
+        // Two issues that claim each other as parent via explicit deps.
+        let mut a = issue("trx-aaaa");
+        a.add_dependency("trx-bbbb".to_string(), DependencyType::ParentChild);
+        let mut b = issue("trx-bbbb");
+        b.add_dependency("trx-aaaa".to_string(), DependencyType::ParentChild);
+        let layout = build_tree_layout(vec![a, b], &HashSet::new());
+        // No root exists, but neither issue may vanish.
+        assert_eq!(layout.issues.len(), 2);
+    }
+
+    #[test]
+    fn test_nested_grandchildren_depth() {
+        let issues = vec![
+            issue("trx-epic"),
+            child("trx-epic.1", "trx-epic"),
+            child("trx-epic.1.1", "trx-epic.1"),
+        ];
+        let layout = build_tree_layout(issues, &HashSet::new());
+        assert_eq!(ids(&layout), vec!["trx-epic", "trx-epic.1", "trx-epic.1.1"]);
+        assert_eq!(layout.depth, vec![0, 1, 2]);
+    }
 }

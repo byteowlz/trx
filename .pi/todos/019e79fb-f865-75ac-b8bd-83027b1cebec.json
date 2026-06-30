@@ -1,0 +1,23 @@
+{
+  "todos": [
+    {
+      "id": "t1",
+      "content": "Improve session view contrast and affordances",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "t2",
+      "content": "Make session action legend and navigation hints clearer",
+      "status": "completed",
+      "priority": "medium"
+    },
+    {
+      "id": "t3",
+      "content": "Run TUI check",
+      "status": "completed",
+      "priority": "medium"
+    }
+  ],
+  "updated_at": "2026-05-30T18:45:29.036Z"
+}

@@ -222,13 +222,115 @@ fn process_exists(pid: u32) -> bool {
     sys.process(Pid::from_u32(pid)).is_some()
 }
 
-fn get_state_dir() -> Result<PathBuf> {
-    let base = std::env::var("XDG_STATE_HOME")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|home| home.join(".local").join("state")))
-        .ok_or_else(|| crate::Error::Service("Could not determine state directory".into()))?;
+/// Resolve an XDG-style base directory across platforms (option B, zero-dep).
+///
+/// An explicit absolute `XDG_*` value always wins on any OS. Otherwise on unix
+/// (incl. macOS) the path is `$HOME/<unix_rel>`; on Windows it is the supplied
+/// `%APPDATA%`/`%LOCALAPPDATA%` directory.
+fn resolve_base(
+    xdg: Option<PathBuf>,
+    home: Option<PathBuf>,
+    win_dir: Option<PathBuf>,
+    is_windows: bool,
+    unix_rel: &str,
+) -> Option<PathBuf> {
+    if let Some(p) = xdg.filter(|p| p.is_absolute()) {
+        return Some(p);
+    }
+    if is_windows {
+        win_dir
+    } else {
+        home.map(|h| h.join(unix_rel))
+    }
+}
 
-    Ok(base.join("trx"))
+/// Resolve a base directory from the running environment, then join the app name.
+fn base_dir(xdg_var: &str, unix_rel: &str, win_var: &str) -> Result<PathBuf> {
+    resolve_base(
+        std::env::var_os(xdg_var)
+            .map(PathBuf::from)
+            .filter(|p| !p.as_os_str().is_empty()),
+        std::env::var_os("HOME").map(PathBuf::from),
+        std::env::var_os(win_var).map(PathBuf::from),
+        cfg!(windows),
+        unix_rel,
+    )
+    .ok_or_else(|| crate::Error::Service(format!("unable to determine base directory ({xdg_var})")))
+}
+
+fn get_state_dir() -> Result<PathBuf> {
+    // state: ("XDG_STATE_HOME", ".local/state", "LOCALAPPDATA")
+    Ok(base_dir("XDG_STATE_HOME", ".local/state", "LOCALAPPDATA")?.join("trx"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_base;
+    use std::path::PathBuf;
+
+    #[test]
+    fn absolute_xdg_wins_on_unix() {
+        let got = resolve_base(
+            Some(PathBuf::from("/explicit/state")),
+            Some(PathBuf::from("/home/u")),
+            Some(PathBuf::from("C:\\Users\\u\\AppData\\Local")),
+            false,
+            ".local/state",
+        );
+        assert_eq!(got, Some(PathBuf::from("/explicit/state")));
+    }
+
+    #[test]
+    fn absolute_xdg_wins_on_windows() {
+        let got = resolve_base(
+            Some(PathBuf::from("/explicit/state")),
+            Some(PathBuf::from("/home/u")),
+            Some(PathBuf::from("C:\\Users\\u\\AppData\\Local")),
+            true,
+            ".local/state",
+        );
+        assert_eq!(got, Some(PathBuf::from("/explicit/state")));
+    }
+
+    #[test]
+    fn relative_xdg_is_ignored() {
+        let got = resolve_base(
+            Some(PathBuf::from("relative/state")),
+            Some(PathBuf::from("/home/u")),
+            None,
+            false,
+            ".local/state",
+        );
+        assert_eq!(got, Some(PathBuf::from("/home/u/.local/state")));
+    }
+
+    #[test]
+    fn unix_falls_back_to_home_rel() {
+        let got = resolve_base(
+            None,
+            Some(PathBuf::from("/home/u")),
+            Some(PathBuf::from("C:\\Users\\u\\AppData\\Local")),
+            false,
+            ".local/state",
+        );
+        assert_eq!(got, Some(PathBuf::from("/home/u/.local/state")));
+    }
+
+    #[test]
+    fn windows_falls_back_to_win_dir() {
+        let got = resolve_base(
+            None,
+            Some(PathBuf::from("/home/u")),
+            Some(PathBuf::from("C:\\Users\\u\\AppData\\Local")),
+            true,
+            ".local/state",
+        );
+        assert_eq!(got, Some(PathBuf::from("C:\\Users\\u\\AppData\\Local")));
+    }
+
+    #[test]
+    fn none_when_no_source_available() {
+        assert_eq!(resolve_base(None, None, None, false, ".local/state"), None);
+        assert_eq!(resolve_base(None, None, None, true, ".local/state"), None);
+    }
 }
