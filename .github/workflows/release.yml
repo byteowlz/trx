@@ -1,190 +1,25 @@
+# trx releases via the shared byteowlz reusable workflow (ADR-0021).
+# It builds linux-gnu (glibc floor) in the byt container + macOS natively, then
+# publishes the GitHub release, Homebrew formula, and AUR package. All release
+# config lives in byt.release.toml; credentials come from org secrets.
 name: Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to release (e.g., v0.2.2)'
+        description: Tag to release (e.g. v0.6.3)
         required: true
         type: string
 
-permissions:
-  contents: write
-
-env:
-  CARGO_TERM_COLOR: always
-  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
-
 jobs:
-  build:
-    name: Build ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            archive: tar.gz
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            archive: tar.gz
-          - target: x86_64-apple-darwin
-            os: macos-14
-            archive: tar.gz
-          - target: aarch64-apple-darwin
-            os: macos-14
-            archive: tar.gz
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.RELEASE_TAG }}
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Setup cross-compilation for aarch64 Linux
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
-          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
-          echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++" >> $GITHUB_ENV
-
-      - name: Build binaries
-        run: cargo build --release --target ${{ matrix.target }}
-
-      - name: Package (Unix)
-        shell: bash
-        run: |
-          cd target/${{ matrix.target }}/release
-          BINS=""
-          for bin in trx trx-tui trx-mcp trx-api; do
-            if [ -f "$bin" ]; then
-              BINS="$BINS $bin"
-            fi
-          done
-          if [ -n "$BINS" ]; then
-            tar czvf ../../../trx-${{ env.RELEASE_TAG }}-${{ matrix.target }}.tar.gz $BINS
-          fi
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: trx-${{ matrix.target }}
-          path: trx-${{ env.RELEASE_TAG }}-${{ matrix.target }}.*
-
   release:
-    name: Create Release
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.RELEASE_TAG }}
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Generate checksums
-        run: |
-          cd artifacts
-          find . -type f -name "*.tar.gz" -exec mv {} . \;
-          sha256sum *.tar.gz > checksums.txt
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ env.RELEASE_TAG }}
-          draft: false
-          generate_release_notes: true
-          files: |
-            artifacts/*.tar.gz
-            artifacts/checksums.txt
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  publish-homebrew:
-    name: Publish to Homebrew
-    needs: release
-    runs-on: ubuntu-latest
-    steps:
-      - name: Update Homebrew tap
-        uses: peter-evans/repository-dispatch@v3
-        with:
-          token: ${{ secrets.TAP_GITHUB_TOKEN }}
-          repository: byteowlz/homebrew-tap
-          event-type: update-formula
-          client-payload: |
-            {
-              "formula": "trx",
-              "version": "${{ env.RELEASE_TAG }}",
-              "repo": "${{ github.repository }}"
-            }
-
-  publish-aur:
-    name: Publish to AUR
-    needs: release
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.RELEASE_TAG }}
-
-      - name: Generate PKGBUILD
-        run: |
-          VERSION="${{ env.RELEASE_TAG }}"
-          VERSION="${VERSION#v}"
-
-          curl -sL "https://github.com/${{ github.repository }}/releases/download/${{ env.RELEASE_TAG }}/checksums.txt" -o checksums.txt
-
-          SHA256_X86=$(grep "x86_64-unknown-linux-gnu.tar.gz" checksums.txt | cut -d' ' -f1)
-          SHA256_ARM=$(grep "aarch64-unknown-linux-gnu.tar.gz" checksums.txt | cut -d' ' -f1)
-
-          cat > PKGBUILD << 'EOF'
-          # Maintainer: byteowlz <dev@byteowlz.com>
-          pkgname=trx-bin
-          pkgver=VERSION_PLACEHOLDER
-          pkgrel=1
-          pkgdesc="Minimal git-backed issue tracker with TUI viewer"
-          arch=('x86_64' 'aarch64')
-          url="https://github.com/byteowlz/trx"
-          license=('MIT')
-          provides=('trx')
-          conflicts=('trx' 'trx-git')
-          source_x86_64=("$pkgname-$pkgver.tar.gz::https://github.com/byteowlz/trx/releases/download/v$pkgver/trx-v$pkgver-x86_64-unknown-linux-gnu.tar.gz")
-          source_aarch64=("$pkgname-$pkgver.tar.gz::https://github.com/byteowlz/trx/releases/download/v$pkgver/trx-v$pkgver-aarch64-unknown-linux-gnu.tar.gz")
-          sha256sums_x86_64=('SHA256_X86_PLACEHOLDER')
-          sha256sums_aarch64=('SHA256_ARM_PLACEHOLDER')
-
-          package() {
-              install -Dm755 trx "$pkgdir/usr/bin/trx"
-              [ -f trx-tui ] && install -Dm755 trx-tui "$pkgdir/usr/bin/trx-tui"
-              [ -f trx-mcp ] && install -Dm755 trx-mcp "$pkgdir/usr/bin/trx-mcp"
-              [ -f trx-api ] && install -Dm755 trx-api "$pkgdir/usr/bin/trx-api"
-              return 0
-          }
-          EOF
-
-          sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" PKGBUILD
-          sed -i "s/SHA256_X86_PLACEHOLDER/${SHA256_X86}/g" PKGBUILD
-          sed -i "s/SHA256_ARM_PLACEHOLDER/${SHA256_ARM}/g" PKGBUILD
-
-      - name: Publish to AUR
-        uses: KSXGitHub/github-actions-deploy-aur@v3.0.1
-        with:
-          pkgname: trx-bin
-          pkgbuild: ./PKGBUILD
-          commit_username: byteowlz
-          commit_email: ${{ secrets.AUR_EMAIL }}
-          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
-          commit_message: "Update to ${{ env.RELEASE_TAG }}"
+    permissions:
+      contents: write
+      packages: read
+    uses: byteowlz/byt/.github/workflows/release.yml@main
+    secrets: inherit
+    with:
+      tag: ${{ inputs.tag }}

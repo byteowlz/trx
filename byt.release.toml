@@ -1,0 +1,26 @@
+# Release config consumed by `byt release` (ADR-0021).
+#
+# The reusable workflow builds linux-gnu in the byt container (glibc floor) and
+# *-apple-darwin natively on a macOS runner, then combines + publishes.
+[release]
+name = "trx"
+lang = "rust"
+bins = ["trx", "trx-tui", "trx-mcp", "trx-api"]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
+
+[release.homebrew]
+formula = "trx"
+# tap defaults to byteowlz/homebrew-tap; event_type to "update-formula".
+
+[release.aur]
+pkgname = "trx-bin"
+pkgdesc = "Minimal git-backed issue tracker with TUI viewer"
+license = "MIT"
+url = "https://github.com/byteowlz/trx"
+provides = ["trx"]
+conflicts = ["trx", "trx-git"]
