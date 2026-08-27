@@ -2348,6 +2348,7 @@ fn action_color(a: EventAction) -> Color {
         EventAction::Restored => Color::Green,
         EventAction::DepAdded | EventAction::DepRemoved => Color::Magenta,
         EventAction::SessionLinked => Color::Cyan,
+        EventAction::VerificationAdded => Color::Cyan,
         EventAction::Updated => Color::White,
     }
 }
@@ -2790,7 +2791,15 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
             .add_modifier(Modifier::BOLD),
     };
 
-    let status_content = if let Some(ref msg) = app.status_message {
+    let status_content = if app.mode == AppMode::Search {
+        Line::from(vec![
+            Span::styled(mode_text, mode_style),
+            Span::raw(" | "),
+            Span::styled("search: ", Style::default().fg(Color::Cyan)),
+            Span::raw(app.search_query.as_str()),
+            Span::styled("█", Style::default().fg(Color::Cyan)),
+        ])
+    } else if let Some(ref msg) = app.status_message {
         Line::from(vec![
             Span::styled(mode_text, mode_style),
             Span::raw(" | "),

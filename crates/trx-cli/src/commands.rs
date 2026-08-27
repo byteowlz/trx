@@ -3,9 +3,10 @@
 use anyhow::{Result, bail};
 use colored::Colorize;
 use trx_core::{
-    AgentCtx, DependencyType, Event, EventAction, EventLog, Issue, IssueGraph, IssueType,
-    SessionSummary, Status, Store, diff_issue, enrich_issue, generate_id, id::generate_child_id,
-    summarize_sessions,
+    AgentCtx, Config, DependencyType, Event, EventAction, EventLog, Issue, IssueGraph, IssueType,
+    SessionSummary, Status, Store, TRX_GITATTRIBUTES_LINES, VerificationCheck, VerificationConfig,
+    VerificationRun, VerificationStatus, VerificationStore, diff_issue, enrich_issue,
+    evaluate_close_gate, generate_id, id::generate_child_id, summarize_sessions,
 };
 
 /// Append an event to `.trx/events.jsonl`. Failures are logged to stderr but
@@ -44,6 +45,142 @@ pub fn init(prefix: &str) -> Result<()> {
     );
     println!("  Issue prefix: {}", prefix);
     Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct DoctorCheck {
+    name: &'static str,
+    status: &'static str,
+    message: String,
+    fixed: bool,
+}
+
+#[derive(serde::Serialize)]
+struct DoctorReport {
+    ok: bool,
+    checks: Vec<DoctorCheck>,
+}
+
+pub fn doctor(fix: bool, json: bool) -> Result<()> {
+    let mut checks = Vec::new();
+    let mut ok = true;
+
+    let store = match Store::open() {
+        Ok(store) => {
+            checks.push(DoctorCheck {
+                name: "store",
+                status: "ok",
+                message: format!("trx store found at {}", store.trx_dir().display()),
+                fixed: false,
+            });
+            store
+        }
+        Err(err) => {
+            ok = false;
+            checks.push(DoctorCheck {
+                name: "store",
+                status: "error",
+                message: format!("trx store not initialized: {err}"),
+                fixed: false,
+            });
+            let report = DoctorReport { ok, checks };
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("{} trx store not initialized: {}", "✗".red(), err);
+                println!("  Run `trx init` first.");
+            }
+            bail!("trx doctor found problems");
+        }
+    };
+
+    let trx_dir = store.trx_dir();
+    let root = trx_dir
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("invalid trx directory: {}", trx_dir.display()))?;
+    let attrs_path = root.join(".gitattributes");
+    let attrs_content = if attrs_path.exists() {
+        std::fs::read_to_string(&attrs_path)?
+    } else {
+        String::new()
+    };
+    let missing: Vec<&str> = TRX_GITATTRIBUTES_LINES
+        .iter()
+        .copied()
+        .filter(|line| {
+            !attrs_content
+                .lines()
+                .any(|existing| existing.trim() == *line)
+        })
+        .collect();
+
+    if missing.is_empty() {
+        checks.push(DoctorCheck {
+            name: "merge_attributes",
+            status: "ok",
+            message: ".gitattributes configures trx JSONL union merges".to_string(),
+            fixed: false,
+        });
+    } else if fix {
+        Store::ensure_merge_attributes(root)?;
+        checks.push(DoctorCheck {
+            name: "merge_attributes",
+            status: "fixed",
+            message: format!(
+                "installed {} missing trx merge attribute entr{} in {}",
+                missing.len(),
+                if missing.len() == 1 { "y" } else { "ies" },
+                attrs_path.display()
+            ),
+            fixed: true,
+        });
+    } else {
+        ok = false;
+        let message = if attrs_path.exists() {
+            format!(
+                ".gitattributes is missing {} required trx merge attribute entr{}; run `trx doctor --fix`",
+                missing.len(),
+                if missing.len() == 1 { "y" } else { "ies" }
+            )
+        } else {
+            ".gitattributes is missing; run `trx doctor --fix` to add trx JSONL union merge rules"
+                .to_string()
+        };
+        checks.push(DoctorCheck {
+            name: "merge_attributes",
+            status: "warning",
+            message,
+            fixed: false,
+        });
+    }
+
+    let report = DoctorReport { ok, checks };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "{} trx store found at {}",
+            "✓".green(),
+            store.trx_dir().display()
+        );
+        for check in &report.checks {
+            if check.name == "store" {
+                continue;
+            }
+            match check.status {
+                "ok" => println!("{} {}", "✓".green(), check.message),
+                "fixed" => println!("{} {}", "✓".green(), check.message),
+                "warning" => println!("{} warning: {}", "!".yellow(), check.message),
+                _ => println!("{} {}", "✗".red(), check.message),
+            }
+        }
+    }
+
+    if report.ok {
+        Ok(())
+    } else {
+        bail!("trx doctor found problems")
+    }
 }
 
 /// Read description from stdin when value is "-"
@@ -543,6 +680,13 @@ pub fn show(id: &str, json: bool) -> Result<()> {
             obj.insert("blocks".into(), serde_json::to_value(&blocks_ids)?);
         }
 
+        // Add verification runs (best-effort: skip silently on read errors).
+        if let Ok(runs) = VerificationStore::at(&store.trx_dir()).for_issue(id)
+            && !runs.is_empty()
+        {
+            obj.insert("verification".into(), serde_json::to_value(&runs)?);
+        }
+
         println!("{}", serde_json::to_string_pretty(&val)?);
     } else {
         println!("{} {}", issue.id.cyan().bold(), issue.title.bold());
@@ -602,6 +746,41 @@ pub fn show(id: &str, json: bool) -> Result<()> {
             }
         }
 
+        // Verification evidence (best-effort: skip silently on read errors).
+        if let Ok(runs) = VerificationStore::at(&store.trx_dir()).for_issue(id)
+            && !runs.is_empty()
+        {
+            println!();
+            println!(
+                "{} ({} run{})",
+                "Verification:".bold(),
+                runs.len(),
+                if runs.len() == 1 { "" } else { "s" }
+            );
+            if let Some(latest) = runs.last() {
+                let glyph = match latest.status {
+                    VerificationStatus::Passed => "✓".green().to_string(),
+                    VerificationStatus::Failed => "✗".red().to_string(),
+                    VerificationStatus::Error => "!".red().to_string(),
+                    VerificationStatus::Skipped => "⊘".yellow().to_string(),
+                };
+                let ts = latest.timestamp.format("%Y-%m-%d %H:%M");
+                let mut line = format!(
+                    "  latest {} {} {} {}",
+                    glyph,
+                    ts.to_string().dimmed(),
+                    latest.run_id,
+                    latest.status
+                );
+                if let Some(rev) = &latest.revision {
+                    let short: String = rev.chars().take(8).collect();
+                    line.push_str(&format!(" @{}", short.dimmed()));
+                }
+                println!("{}", line);
+            }
+            println!("    see: trx verify list {}", id);
+        }
+
         // Recent activity (best-effort: skip silently on read errors so we
         // never fail `show` because of a corrupt event log line).
         if let Ok(events) = EventLog::at(&store.trx_dir()).read_all() {
@@ -632,6 +811,31 @@ pub fn update(
     json: bool,
 ) -> Result<()> {
     let mut store = Store::open()?;
+    if store.get(id).is_none() {
+        bail!("Issue not found: {}", id);
+    }
+
+    // Closing via `update --status closed` runs the same verification gate as
+    // `close`. Evaluate it before the mutable borrow below; there is no
+    // override flag here, so use `trx close --verification-override` to bypass.
+    let target_closed = match &status {
+        Some(s) => s.parse::<Status>().map(|p| p.is_closed()).unwrap_or(false),
+        None => false,
+    };
+    let before_is_closed = store.get(id).map(|i| i.status.is_closed()).unwrap_or(false);
+    if target_closed
+        && !before_is_closed
+        && let Err(diagnostics) = check_verification_gate(&store, id)
+    {
+        eprintln!("{} cannot close {} via update:", "✗".red(), id);
+        for d in &diagnostics {
+            eprintln!("    - {}", d);
+        }
+        eprintln!();
+        eprintln!("Use `trx close --verification-override \"reason\"` to bypass the gate.");
+        bail!("verification closure gate blocked closing {}", id);
+    }
+
     let issue = store
         .get_mut(id)
         .ok_or_else(|| anyhow::anyhow!("Issue not found: {}", id))?;
@@ -694,11 +898,46 @@ pub fn update(
     Ok(())
 }
 
-pub fn close(ids: &[String], reason: Option<String>, json: bool) -> Result<()> {
+pub fn close(
+    ids: &[String],
+    reason: Option<String>,
+    verification_override: Option<String>,
+    json: bool,
+) -> Result<()> {
     let mut store = Store::open()?;
     let ctx = AgentCtx::from_env();
-    let mut closed: Vec<Issue> = Vec::new();
 
+    // Pre-flight the verification gate for every target before closing any,
+    // so a blocked issue never produces a partial close.
+    if verification_override.is_none() {
+        let mut blocked: Vec<(String, Vec<String>)> = Vec::new();
+        for id in ids {
+            match check_verification_gate(&store, id) {
+                Ok(()) => {}
+                Err(diagnostics) => blocked.push((id.clone(), diagnostics)),
+            }
+        }
+        if !blocked.is_empty() {
+            for (id, diags) in &blocked {
+                eprintln!("{} cannot close {}:", "✗".red(), id);
+                for d in diags {
+                    eprintln!("    - {}", d);
+                }
+            }
+            eprintln!();
+            eprintln!(
+                "Add qualifying evidence with `trx verify add` or bypass with \
+                 `trx close --verification-override \"reason\"`."
+            );
+            bail!(
+                "verification closure gate blocked closing {} issue{}",
+                blocked.len(),
+                if blocked.len() == 1 { "" } else { "s" }
+            );
+        }
+    }
+
+    let mut closed: Vec<Issue> = Vec::new();
     for id in ids {
         let issue = store
             .get_mut(id)
@@ -708,8 +947,14 @@ pub fn close(ids: &[String], reason: Option<String>, json: bool) -> Result<()> {
         store.update(snap.clone())?;
 
         let mut event = Event::new(&snap.id, EventAction::Closed, &ctx);
-        if let Some(r) = &reason {
-            event = event.with_note(r.clone());
+        let note = match (&reason, &verification_override) {
+            (Some(r), Some(o)) => Some(format!("{} (verification override: {})", r, o)),
+            (None, Some(o)) => Some(format!("verification override: {}", o)),
+            (Some(r), None) => Some(r.clone()),
+            (None, None) => None,
+        };
+        if let Some(n) = note {
+            event = event.with_note(n);
         }
         emit_event(&store, event);
         closed.push(snap);
@@ -726,6 +971,446 @@ pub fn close(ids: &[String], reason: Option<String>, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// Load the repository verification policy and current revision, then evaluate
+/// the closure gate for one issue. Returns `Ok(())` when closure may proceed,
+/// or `Err(diagnostics)` listing every actionable reason it is blocked.
+fn check_verification_gate(store: &Store, issue_id: &str) -> std::result::Result<(), Vec<String>> {
+    let issue = store
+        .get(issue_id)
+        .ok_or_else(|| vec![format!("Issue not found: {}", issue_id)])?;
+
+    let config_path = store.trx_dir().join("config.toml");
+    let config = Config::load(&config_path).unwrap_or_default();
+    let vconfig: &VerificationConfig = &config.verification;
+    if vconfig.is_inactive() {
+        return Ok(());
+    }
+
+    let vstore = VerificationStore::at(&store.trx_dir());
+    let runs = vstore.read_all().unwrap_or_default();
+    let current_revision = current_git_revision();
+    let report = evaluate_close_gate(issue, &runs, vconfig, current_revision.as_deref());
+    if report.allowed {
+        Ok(())
+    } else {
+        Err(report.diagnostics)
+    }
+}
+
+/// Best-effort current Git HEAD revision. Returns `None` when git is
+/// unavailable, this isn't a repo, or HEAD is unborn — leaving the closure
+/// gate to report that current-revision proof can't be established.
+fn current_git_revision() -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if sha.is_empty() { None } else { Some(sha) }
+}
+
+// ============================================================================
+// Verification evidence: trx verify add/list/show (trx-rkrb)
+// ============================================================================
+
+/// Merge precedence helper: prefer the CLI-provided value, else fall back to a
+/// field read from `--input` JSON.
+fn or_input(cli: Option<String>, input: Option<String>) -> Option<String> {
+    cli.or(input)
+}
+
+/// Parse a `--check "name=status"` or `--check "name=status:detail"` token.
+fn parse_check_token(token: &str) -> Result<VerificationCheck> {
+    // Split into name and the rest on the first '='.
+    let Some((name, rest)) = token.split_once('=') else {
+        bail!(
+            "invalid --check '{}': expected 'name=status' or 'name=status:detail'",
+            token
+        );
+    };
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        bail!("invalid --check '{}': empty check name", token);
+    }
+    // status is everything up to the first ':'; detail is the remainder (so a
+    // detail may itself contain ':').
+    let (status_str, detail) = match rest.split_once(':') {
+        Some((s, d)) => (s, Some(d.to_string())),
+        None => (rest, None),
+    };
+    let status: VerificationStatus = status_str
+        .trim()
+        .parse()
+        .map_err(|e: trx_core::Error| anyhow::anyhow!("invalid --check '{}': {}", token, e))?;
+    Ok(VerificationCheck {
+        name,
+        status,
+        detail: detail.filter(|d| !d.trim().is_empty()),
+    })
+}
+
+/// Reject empty/whitespace artifact references; keep everything else opaque.
+fn validate_artifacts(artifacts: &[String]) -> Result<()> {
+    for a in artifacts {
+        if a.trim().is_empty() {
+            bail!("artifact reference is empty; pass a non-empty URI or path");
+        }
+        if a.contains('\n') || a.contains('\r') {
+            bail!("artifact reference must not contain newlines: {}", a);
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn verify_add(
+    issue_id: &str,
+    run_id: Option<String>,
+    status: Option<&str>,
+    revision: Option<String>,
+    environment: Option<String>,
+    scenario: Option<String>,
+    command: Option<String>,
+    summary: Option<String>,
+    artifacts: Vec<String>,
+    checks: Vec<String>,
+    gaps: Option<String>,
+    input: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let store = Store::open()?;
+    if store.get(issue_id).is_none() {
+        bail!("Issue not found: {}", issue_id);
+    }
+
+    // Optional JSON input (file or stdin) supplies defaults; CLI flags win.
+    let input_json: Option<serde_json::Value> = match input.as_deref() {
+        Some("-") => {
+            use std::io::Read;
+            let mut buf = String::new();
+            std::io::stdin().read_to_string(&mut buf)?;
+            Some(serde_json::from_str(&buf)?)
+        }
+        Some(path) => {
+            let content = std::fs::read_to_string(path)?;
+            Some(serde_json::from_str(&content)?)
+        }
+        None => None,
+    };
+
+    let input_str = |key: &str| -> Option<String> {
+        input_json
+            .as_ref()
+            .and_then(|v| v.get(key))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    };
+    let input_artifacts: Vec<String> = input_json
+        .as_ref()
+        .and_then(|v| v.get("artifacts"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let input_checks: Option<Vec<VerificationCheck>> = input_json
+        .as_ref()
+        .and_then(|v| v.get("checks"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .map(|c| {
+                    let name = c
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| anyhow::anyhow!("check entry missing 'name'"))?
+                        .to_string();
+                    let status_str = c.get("status").and_then(|v| v.as_str()).ok_or_else(|| {
+                        anyhow::anyhow!("check entry '{}' missing 'status'", name)
+                    })?;
+                    let status: VerificationStatus =
+                        status_str.parse().map_err(|e: trx_core::Error| {
+                            anyhow::anyhow!("check entry '{}': {}", name, e)
+                        })?;
+                    let detail = c
+                        .get("detail")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    Ok::<_, anyhow::Error>(VerificationCheck {
+                        name,
+                        status,
+                        detail,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()
+        })
+        .transpose()?;
+
+    // Resolve the run_id: CLI > input JSON > auto-generated.
+    let run_id = or_input(run_id, input_str("run_id")).unwrap_or_else(|| generate_id("vrun"));
+
+    // Status: CLI > input JSON. Required.
+    let status_str = match status {
+        Some(s) => Some(s.to_string()),
+        None => input_str("status"),
+    };
+    let status: VerificationStatus = match status_str.as_deref() {
+        Some(s) => s
+            .parse()
+            .map_err(|e: trx_core::Error| anyhow::anyhow!("{}", e))?,
+        None => bail!("--status is required (passed, failed, error, or skipped)"),
+    };
+
+    let revision = match or_input(revision, input_str("revision")) {
+        Some(r) => {
+            let r = r.trim().to_string();
+            if r.is_empty() {
+                bail!("--revision must not be empty");
+            }
+            Some(r)
+        }
+        None => None,
+    };
+    let environment = or_input(environment, input_str("environment"));
+    let scenario = or_input(scenario, input_str("scenario"));
+    let command = or_input(command, input_str("command"));
+    let summary = or_input(summary, input_str("summary"));
+    let gaps = or_input(gaps, input_str("gaps"));
+
+    // Artifacts: CLI flags append after JSON artifacts (dedup preserving order).
+    let mut all_artifacts: Vec<String> = input_artifacts;
+    for a in artifacts {
+        all_artifacts.push(a);
+    }
+    all_artifacts.retain(|a| !a.trim().is_empty());
+    validate_artifacts(&all_artifacts)?;
+
+    // Checks: CLI tokens parsed and appended after JSON checks.
+    let mut all_checks: Vec<VerificationCheck> = input_checks.unwrap_or_default();
+    for token in &checks {
+        all_checks.push(parse_check_token(token)?);
+    }
+
+    let run = VerificationRun {
+        run_id: run_id.clone(),
+        issue_id: issue_id.to_string(),
+        status,
+        revision,
+        timestamp: chrono::Utc::now(),
+        environment,
+        scenario,
+        command,
+        summary,
+        artifacts: all_artifacts,
+        checks: all_checks,
+        gaps,
+    };
+
+    let vstore = VerificationStore::at(&store.trx_dir());
+
+    // Idempotent re-submission: same (issue, run_id) with equivalent content
+    // is a no-op; a conflicting record under the same key fails clearly.
+    if let Some(existing) = vstore.find(issue_id, &run.run_id)? {
+        if existing.equivalent_to(&run) {
+            if json {
+                println!("{}", serde_json::to_string(&existing)?);
+            } else {
+                println!(
+                    "{} Verification {} already recorded for {} (idempotent)",
+                    "✓".green(),
+                    existing.run_id,
+                    issue_id
+                );
+            }
+            return Ok(());
+        }
+        bail!(
+            "verification run '{}' already exists for {} with different content; \
+             use a unique --run-id",
+            run.run_id,
+            issue_id
+        );
+    }
+
+    vstore.append(&run)?;
+
+    // Emit a thin pointer into the unified event log so `trx log`/`history`/
+    // `events` see verification activity.
+    let ctx = AgentCtx::from_env();
+    emit_event(
+        &store,
+        Event::new(issue_id, EventAction::VerificationAdded, &ctx)
+            .with_note(format!("{}: {}", run.run_id, run.status)),
+    );
+
+    if json {
+        println!("{}", serde_json::to_string(&run)?);
+    } else {
+        println!(
+            "{} Recorded verification {} for {}",
+            "✓".green(),
+            run.run_id,
+            issue_id
+        );
+        println!("  Status: {}", run.status);
+        if let Some(r) = &run.revision {
+            println!("  Revision: {}", r);
+        }
+        if !run.artifacts.is_empty() {
+            println!("  Artifacts: {}", run.artifacts.join(", "));
+        }
+    }
+
+    Ok(())
+}
+
+pub fn verify_list(issue_id: &str, limit: Option<usize>, json: bool) -> Result<()> {
+    let store = Store::open()?;
+    if store.get(issue_id).is_none() {
+        bail!("Issue not found: {}", issue_id);
+    }
+    let vstore = VerificationStore::at(&store.trx_dir());
+    let mut runs = vstore.for_issue(issue_id)?;
+    if let Some(n) = limit {
+        // Keep the most recent N (oldest-first order, drop from the front).
+        let drop = runs.len().saturating_sub(n);
+        runs.drain(..drop);
+    }
+
+    if json {
+        println!("{}", serde_json::to_string(&runs)?);
+        return Ok(());
+    }
+
+    if runs.is_empty() {
+        println!("No verification runs for {}", issue_id);
+        return Ok(());
+    }
+
+    println!(
+        "{} {} ({} run{})",
+        "Verification:".bold(),
+        issue_id.cyan(),
+        runs.len(),
+        if runs.len() == 1 { "" } else { "s" }
+    );
+    for r in &runs {
+        let glyph = match r.status {
+            VerificationStatus::Passed => "✓".green().to_string(),
+            VerificationStatus::Failed => "✗".red().to_string(),
+            VerificationStatus::Error => "!".red().to_string(),
+            VerificationStatus::Skipped => "⊘".yellow().to_string(),
+        };
+        let ts = r.timestamp.format("%Y-%m-%d %H:%M");
+        let mut line = format!(
+            "  {} {} {} {}",
+            glyph,
+            ts.to_string().dimmed(),
+            r.run_id,
+            r.status
+        );
+        if let Some(rev) = &r.revision {
+            let short: String = rev.chars().take(8).collect();
+            line.push_str(&format!(" @{}", short.dimmed()));
+        }
+        if let Some(env) = &r.environment {
+            line.push_str(&format!(" [{}]", env));
+        }
+        println!("{}", line);
+        if let Some(s) = &r.summary {
+            println!("      {}", s);
+        }
+        if !r.artifacts.is_empty() {
+            println!("      artifacts: {}", r.artifacts.join(", "));
+        }
+        for c in &r.checks {
+            let cglyph = match c.status {
+                VerificationStatus::Passed => "✓".green().to_string(),
+                VerificationStatus::Failed => "✗".red().to_string(),
+                VerificationStatus::Error => "!".red().to_string(),
+                VerificationStatus::Skipped => "⊘".yellow().to_string(),
+            };
+            let mut cline = format!("      {} {}", cglyph, c.name);
+            if let Some(d) = &c.detail {
+                cline.push_str(&format!(": {}", d));
+            }
+            println!("{}", cline);
+        }
+    }
+    Ok(())
+}
+
+pub fn verify_show(issue_id: &str, run_id: &str, json: bool) -> Result<()> {
+    let store = Store::open()?;
+    if store.get(issue_id).is_none() {
+        bail!("Issue not found: {}", issue_id);
+    }
+    let vstore = VerificationStore::at(&store.trx_dir());
+    let run = vstore.find(issue_id, run_id)?.ok_or_else(|| {
+        anyhow::anyhow!("Verification run not found: {} for {}", run_id, issue_id)
+    })?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&run)?);
+        return Ok(());
+    }
+
+    println!(
+        "{} {}",
+        run.run_id.cyan().bold(),
+        format!("[{}]", run.status).bold()
+    );
+    println!("  Issue:      {}", issue_id);
+    println!(
+        "  Recorded:   {}",
+        run.timestamp.format("%Y-%m-%d %H:%M:%S")
+    );
+    if let Some(r) = &run.revision {
+        println!("  Revision:   {}", r);
+    }
+    if let Some(e) = &run.environment {
+        println!("  Environment: {}", e);
+    }
+    if let Some(s) = &run.scenario {
+        println!("  Scenario:   {}", s);
+    }
+    if let Some(c) = &run.command {
+        println!("  Command:    {}", c);
+    }
+    if let Some(s) = &run.summary {
+        println!("  Summary:    {}", s);
+    }
+    if !run.artifacts.is_empty() {
+        println!("  Artifacts:");
+        for a in &run.artifacts {
+            println!("    - {}", a);
+        }
+    }
+    if !run.checks.is_empty() {
+        println!("  Checks:");
+        for c in &run.checks {
+            let g = match c.status {
+                VerificationStatus::Passed => "✓",
+                VerificationStatus::Failed => "✗",
+                VerificationStatus::Error => "!",
+                VerificationStatus::Skipped => "⊘",
+            };
+            match &c.detail {
+                Some(d) => println!("    {} {} [{}]: {}", g, c.name, c.status, d),
+                None => println!("    {} {} [{}]", g, c.name, c.status),
+            }
+        }
+    }
+    if let Some(g) = &run.gaps {
+        println!("  Gaps:       {}", g);
+    }
+    Ok(())
+}
 pub fn ready(
     issue_type: Option<String>,
     priority: Option<u8>,
@@ -2107,6 +2792,28 @@ pub fn schema() -> Result<()> {
                         "default": 80
                     }
                 }
+            },
+            "verification": {
+                "type": "object",
+                "description": "Opt-in closure gate: require verification evidence before closing listed issue types",
+                "properties": {
+                    "require_for": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Issue types (bug, feature, ...) that require verification before close. Empty disables the policy.",
+                        "default": []
+                    },
+                    "require_pass": {
+                        "type": "boolean",
+                        "description": "Require the latest verification run to have status 'passed'",
+                        "default": false
+                    },
+                    "require_current_revision": {
+                        "type": "boolean",
+                        "description": "Require the latest verification run to target the current Git revision",
+                        "default": false
+                    }
+                }
             }
         }
     });
@@ -2149,6 +2856,27 @@ pub fn config_show(json: bool) -> Result<()> {
         println!("date_format = \"{}\"", config.display.date_format);
         println!("show_count = {}", config.display.show_count);
         println!("max_title_length = {}", config.display.max_title_length);
+        println!();
+        println!("[verification]");
+        if config.verification.require_for.is_empty() {
+            println!("require_for = []  # policy inactive");
+        } else {
+            println!(
+                "require_for = [{}]",
+                config
+                    .verification
+                    .require_for
+                    .iter()
+                    .map(|t| format!("\"{}\"", t))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        println!("require_pass = {}", config.verification.require_pass);
+        println!(
+            "require_current_revision = {}",
+            config.verification.require_current_revision
+        );
     }
 
     Ok(())
@@ -2281,6 +3009,31 @@ pub fn config_set(key: &str, value: &str) -> Result<()> {
             config.display.max_title_length = value
                 .parse()
                 .map_err(|_| anyhow::anyhow!("Invalid integer value: {}", value))?;
+        }
+        "verification.require_for" => {
+            // Accept comma-separated list ("bug, feature") or "[]" to clear.
+            let trimmed = value.trim();
+            if trimmed == "[]" || trimmed.is_empty() {
+                config.verification.require_for = Vec::new();
+            } else {
+                config.verification.require_for = trimmed
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .split(',')
+                    .map(|s| s.trim().trim_matches('"').to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+            }
+        }
+        "verification.require_pass" => {
+            config.verification.require_pass = value
+                .parse()
+                .map_err(|_| anyhow::anyhow!("Invalid boolean value: {}", value))?;
+        }
+        "verification.require_current_revision" => {
+            config.verification.require_current_revision = value
+                .parse()
+                .map_err(|_| anyhow::anyhow!("Invalid boolean value: {}", value))?;
         }
         _ => bail!("Unknown config key: {}", key),
     }
@@ -2923,6 +3676,7 @@ fn colored_action(a: EventAction) -> String {
         EventAction::Restored => s.green().to_string(),
         EventAction::DepAdded | EventAction::DepRemoved => s.magenta().to_string(),
         EventAction::SessionLinked => s.cyan().to_string(),
+        EventAction::VerificationAdded => s.bright_cyan().to_string(),
         EventAction::Updated => s.normal().to_string(),
     }
 }
@@ -3643,7 +4397,7 @@ fn action_priority(a: EventAction) -> u8 {
         EventAction::Reopened => 4,
         EventAction::Created => 3,
         EventAction::DepAdded | EventAction::DepRemoved => 2,
-        EventAction::SessionLinked | EventAction::Restored => 1,
+        EventAction::SessionLinked | EventAction::Restored | EventAction::VerificationAdded => 1,
         EventAction::Updated => 0,
     }
 }
@@ -3658,6 +4412,7 @@ fn action_glyph(a: EventAction) -> &'static str {
         EventAction::Restored => "↻",
         EventAction::DepAdded | EventAction::DepRemoved => "◆",
         EventAction::SessionLinked => "·",
+        EventAction::VerificationAdded => "✓",
     }
 }
 
@@ -3672,6 +4427,7 @@ fn colored_glyph(a: EventAction) -> String {
         EventAction::Restored => g.green().to_string(),
         EventAction::DepAdded | EventAction::DepRemoved => g.magenta().to_string(),
         EventAction::SessionLinked => g.cyan().to_string(),
+        EventAction::VerificationAdded => g.bright_cyan().to_string(),
     }
 }
 

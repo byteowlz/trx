@@ -29,6 +29,7 @@ pub enum EventAction {
     DepAdded,
     DepRemoved,
     SessionLinked,
+    VerificationAdded,
 }
 
 impl std::fmt::Display for EventAction {
@@ -43,6 +44,7 @@ impl std::fmt::Display for EventAction {
             EventAction::DepAdded => "dep_added",
             EventAction::DepRemoved => "dep_removed",
             EventAction::SessionLinked => "session_linked",
+            EventAction::VerificationAdded => "verification_added",
         };
         f.write_str(s)
     }
@@ -61,6 +63,7 @@ impl std::str::FromStr for EventAction {
             "dep_added" | "dep-added" => Ok(EventAction::DepAdded),
             "dep_removed" | "dep-removed" => Ok(EventAction::DepRemoved),
             "session_linked" | "session-linked" => Ok(EventAction::SessionLinked),
+            "verification_added" | "verification-added" => Ok(EventAction::VerificationAdded),
             _ => Err(Error::Other(format!("unknown event action: {}", s))),
         }
     }

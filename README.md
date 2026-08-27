@@ -92,10 +92,13 @@ trx create TITLE [-t TYPE] [-p PRIORITY] [-d DESC] [--parent ID]
 trx list [--status S] [--type T] [--all]
 trx show ID
 trx update ID [--status S] [--priority P] [--title T]
-trx close ID [-r REASON]
+trx close ID [-r REASON] [--verification-override REASON]
 trx ready                      # Show unblocked work
 trx dep add ID --blocks OTHER
 trx dep rm ID --blocks OTHER
+trx verify add ID [--run-id R] --status S [--revision SHA] [--artifact URI]...
+trx verify list ID
+trx verify show ID RUN_ID
 trx sync [-m MESSAGE]          # Git add + commit .trx/
 
 # Migration

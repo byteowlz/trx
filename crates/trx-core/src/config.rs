@@ -38,6 +38,10 @@ pub struct Config {
     /// Display settings
     #[serde(default)]
     pub display: DisplayConfig,
+
+    /// Verification / closure-gate policy (opt-in; default is inert).
+    #[serde(default)]
+    pub verification: crate::verification::VerificationConfig,
 }
 
 impl Default for Config {
@@ -52,6 +56,7 @@ impl Default for Config {
             editor: None,
             git: GitConfig::default(),
             display: DisplayConfig::default(),
+            verification: crate::verification::VerificationConfig::default(),
         }
     }
 }
@@ -162,6 +167,14 @@ show_count = true
 
 # Maximum title length before truncation
 max_title_length = 80
+
+# [verification]
+# Opt-in closure gate: require structured verification evidence before an
+# issue of a listed type can be closed. Default (section absent) is inert —
+# existing `trx close` behavior is unchanged.
+# require_for = ["bug", "feature"]
+# require_pass = true
+# require_current_revision = true
 "#
         .to_string()
     }

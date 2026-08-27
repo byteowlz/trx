@@ -14,6 +14,7 @@ pub mod issue;
 pub(crate) mod legacy_crdt;
 pub mod service;
 pub mod store;
+pub mod verification;
 
 pub use agent_ctx::AgentCtx;
 pub use config::Config;
@@ -26,7 +27,11 @@ pub use graph::IssueGraph;
 pub use id::generate_id;
 pub use issue::{Dependency, DependencyType, Issue, IssueType, Status};
 pub use service::{ServiceManager, ServiceStatus};
-pub use store::Store;
+pub use store::{Store, TRX_GITATTRIBUTES_LINES};
+pub use verification::{
+    CloseGateReport, VerificationCheck, VerificationConfig, VerificationRun, VerificationStatus,
+    VerificationStore, evaluate_close_gate, latest_run,
+};
 
 /// Result type for trx operations
 pub type Result<T> = std::result::Result<T, Error>;

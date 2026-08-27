@@ -29,6 +29,13 @@ enum Commands {
         prefix: String,
     },
 
+    /// Check trx repository health and optionally repair safe setup issues
+    Doctor {
+        /// Apply safe fixes, such as installing missing .gitattributes entries
+        #[arg(long)]
+        fix: bool,
+    },
+
     /// Create a new issue
     Create {
         /// Issue title
@@ -159,6 +166,18 @@ enum Commands {
         /// Reason for closing
         #[arg(short, long)]
         reason: Option<String>,
+
+        /// Override the verification closure gate with an auditable reason.
+        /// Bypasses [verification] policy; the reason is persisted to the
+        /// event log and shown in issue history.
+        #[arg(long)]
+        verification_override: Option<String>,
+    },
+
+    /// Record or inspect structured verification evidence for issues
+    Verify {
+        #[command(subcommand)]
+        command: VerifyCommands,
     },
 
     /// Show ready (unblocked) issues
@@ -434,7 +453,8 @@ enum Commands {
         user: Option<String>,
 
         /// Filter by event action (created, updated, closed, reopened,
-        /// dep_added, dep_removed, session_linked, deleted, restored)
+        /// dep_added, dep_removed, session_linked, verification_added,
+        /// deleted, restored)
         #[arg(long)]
         action: Option<String>,
 
@@ -493,6 +513,82 @@ enum ServiceCommands {
 
     /// Show instructions for enabling auto-start
     Enable,
+}
+
+#[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)] // clap arg enum: fields are short-lived CLI strings
+enum VerifyCommands {
+    /// Record a verification run for an issue
+    Add {
+        /// Issue ID this run proves
+        issue_id: String,
+
+        /// Stable run identifier (idempotency key). Auto-generated when omitted,
+        /// but providing one lets CI retries be idempotent.
+        #[arg(long)]
+        run_id: Option<String>,
+
+        /// Run status: passed, failed, error, skipped
+        #[arg(long)]
+        status: Option<String>,
+
+        /// Subject revision (usually a Git commit SHA)
+        #[arg(long)]
+        revision: Option<String>,
+
+        /// Environment / target (e.g. local, ubuntu-worker, ci)
+        #[arg(long)]
+        environment: Option<String>,
+
+        /// Scenario / check-group identifier
+        #[arg(long)]
+        scenario: Option<String>,
+
+        /// Command or producer identity that generated the run
+        #[arg(long)]
+        command: Option<String>,
+
+        /// Concise summary
+        #[arg(long)]
+        summary: Option<String>,
+
+        /// Artifact reference (URI or path). Repeatable.
+        #[arg(long)]
+        artifact: Vec<String>,
+
+        /// Structured check as `name=status` or `name=status:detail`
+        /// (status: passed/failed/error/skipped). Repeatable.
+        #[arg(long)]
+        check: Vec<String>,
+
+        /// Known gaps / caveats
+        #[arg(long)]
+        gaps: Option<String>,
+
+        /// Read a full/partial record from JSON (file path or "-" for stdin).
+        /// CLI flags override fields present in the JSON.
+        #[arg(long)]
+        input: Option<String>,
+    },
+
+    /// List verification runs for an issue (newest last)
+    List {
+        /// Issue ID
+        issue_id: String,
+
+        /// Limit number of runs shown
+        #[arg(short = 'l', long)]
+        limit: Option<usize>,
+    },
+
+    /// Show one verification run
+    Show {
+        /// Issue ID
+        issue_id: String,
+
+        /// Run ID
+        run_id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -557,6 +653,7 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::Init { prefix } => commands::init(&prefix),
+        Commands::Doctor { fix } => commands::doctor(fix, cli.json),
         Commands::Create {
             title,
             issue_type,
@@ -624,7 +721,11 @@ fn main() -> Result<()> {
             clear,
             cli.json,
         ),
-        Commands::Close { ids, reason } => commands::close(&ids, reason, cli.json),
+        Commands::Close {
+            ids,
+            reason,
+            verification_override,
+        } => commands::close(&ids, reason, verification_override, cli.json),
         Commands::Ready {
             issue_type,
             priority,
@@ -635,6 +736,42 @@ fn main() -> Result<()> {
             DepCommands::Block { id, by } => commands::dep_block(&id, &by, cli.json),
             DepCommands::Unblock { id, by } => commands::dep_unblock(&id, &by, cli.json),
             DepCommands::Tree { id } => commands::dep_tree(&id, cli.json),
+        },
+        Commands::Verify { command } => match command {
+            VerifyCommands::Add {
+                issue_id,
+                run_id,
+                status,
+                revision,
+                environment,
+                scenario,
+                command,
+                summary,
+                artifact,
+                check,
+                gaps,
+                input,
+            } => commands::verify_add(
+                &issue_id,
+                run_id,
+                status.as_deref(),
+                revision,
+                environment,
+                scenario,
+                command,
+                summary,
+                artifact,
+                check,
+                gaps,
+                input,
+                cli.json,
+            ),
+            VerifyCommands::List { issue_id, limit } => {
+                commands::verify_list(&issue_id, limit, cli.json)
+            }
+            VerifyCommands::Show { issue_id, run_id } => {
+                commands::verify_show(&issue_id, &run_id, cli.json)
+            }
         },
         Commands::CreateMany {
             json_input,

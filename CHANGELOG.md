@@ -7,8 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## [0.7.0] - 2026-08-27
+
 ### Added
 
+- `trx doctor` checks repository health and `trx doctor --fix` installs missing `.gitattributes` entries for trx append-only JSONL union merges.
+- Structured verification evidence and configurable closure gates (trx-rkrb). New `trx verify add/list/show` commands record immutable, repository/tool-agnostic proof runs (status, revision, environment, scenario, command, summary, artifact references, structured checks, gaps) to a new append-only `.trx/verifications.jsonl`. `verify add` accepts individual flags or a full record via `--input` JSON/stdin, auto-generates a run id when omitted, and is idempotent on identical re-submission while rejecting conflicting re-use of a run id. Runs are surfaced in `trx show` (human + JSON) and a thin `verification_added` event feeds `trx log`/`history`/`events`. Opt-in `[verification]` policy (`require_for`, `require_pass`, `require_current_revision`) gates `trx close` (and `update --status closed`) with actionable diagnostics; `trx close --verification-override "reason"` bypasses the gate and persists the reason to the event log. Default config is inert, so existing repositories and `trx close` behavior are unchanged.
 - TUI quick inline editors for the selected issue: `p` sets priority, `t` sets type, `L` edits labels, `m` sets/clears the assignee (in addition to the existing `1`-`4` status keys). Priority/type changes keep the cursor anchored across the re-sort.
 - TUI `Tab` collapses or shows the detail pane, giving the issue list/tree the full terminal width for browsing tree and saved-view contexts.
 - TUI issue list now renders epics and any issue with children as a collapsible nested tree (default on). Parentage comes from `parent_child` dependencies or the `epic.N` id convention; collapsed parents show a `(N)` hidden-child count. Keys: `z` fold/unfold the row, `h`/`Left` collapse-or-jump-to-parent, `l`/`Right` expand-or-descend, `Z` toggle nested tree ↔ flat list. Fold state persists for the session.
@@ -16,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `.trx/issues.jsonl` now persists issue snapshots as an append-only JSONL log and loads with last-write-wins by `updated_at`, enabling safe `merge=union` conflict resolution for both issues and events.
 - TUI `t` and `p` now edit the selected issue's type/priority instead of opening the redundant type/priority filter menus; use `f` for filtering.
 - TUI supports `$VISUAL`/`$EDITOR` workflows: `E` edits the selected issue description and `N` adds a note, restoring the terminal UI on editor exit.
 - TUI session view now uses human-friendly session names, explains unattributed events, shows actor/action/issue summaries, and lists touched issues before the timeline.
@@ -23,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- TUI search mode now shows the current query being typed in the status bar (with a visible cursor), instead of only the `[SEARCH]` mode tag.
 - Store discovery now stops at the current git repository boundary: running `trx` inside a repo without `.trx/` no longer falls through to a parent repo's tracker store.
 
 ## [0.6.1] - 2026-05-30
