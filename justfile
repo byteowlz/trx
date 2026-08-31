@@ -95,3 +95,19 @@ release-check:
     cargo clippy --all-targets --quiet -- -D warnings
     cargo fmt -- --check
     echo "All checks passed!"
+
+# Publish trx's agent skill to the canonical byteowlz skills repository.
+sync-skills:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    target="${SKILLISSUES:-$HOME/byteowlz/skillissues}"
+    test -d "$target/skills" || { echo "skillissues repo not found: $target" >&2; exit 1; }
+    rm -rf "$target/skills/trx"
+    cp -a skills/trx "$target/skills/"
+    just --justfile "$target/Justfile" update-readme
+    git -C "$target" add skills/trx README.md
+    if [[ -n "$(git -C "$target" status --porcelain -- skills/trx README.md)" ]]; then
+        git -C "$target" commit -m "skills/trx: sync from trx" -- skills/trx README.md
+    else
+        echo "trx is already up to date"
+    fi
