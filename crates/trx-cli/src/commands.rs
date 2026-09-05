@@ -2309,6 +2309,10 @@ fn open_editor_for_description(current: &str, title: &str) -> Result<String> {
 pub fn sync(message: Option<String>, dry_run: bool, no_commit: bool) -> Result<()> {
     let store = Store::open()?;
     let trx_dir = store.trx_dir();
+    let root = trx_dir
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("invalid trx directory: {}", trx_dir.display()))?;
+    let attributes_path = root.join(".gitattributes");
 
     if dry_run {
         // Show what would be staged
@@ -2327,12 +2331,48 @@ pub fn sync(message: Option<String>, dry_run: bool, no_commit: bool) -> Result<(
         return Ok(());
     }
 
+    let attributes_content = if attributes_path.exists() {
+        std::fs::read_to_string(&attributes_path)?
+    } else {
+        String::new()
+    };
+    let attributes_need_update = TRX_GITATTRIBUTES_LINES.iter().any(|required| {
+        !attributes_content
+            .lines()
+            .any(|existing| existing.trim() == *required)
+    });
+    if attributes_need_update && attributes_path.exists() {
+        let output = std::process::Command::new("git")
+            .args(["status", "--porcelain", "--"])
+            .arg(&attributes_path)
+            .output()?;
+        if !output.status.success() {
+            bail!(
+                "git status failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        if !output.stdout.is_empty() {
+            bail!(
+                "cannot install trx merge attributes because {} has uncommitted changes; commit or stash it, then retry",
+                attributes_path.display()
+            );
+        }
+    }
+    if attributes_need_update {
+        Store::ensure_merge_attributes(root)?;
+    }
+
     let msg = message.unwrap_or_else(|| "trx: sync issues".to_string());
 
-    // Git add .trx/
-    let output = std::process::Command::new("git")
-        .args(["add", &trx_dir.to_string_lossy()])
-        .output()?;
+    // Stage the append-only ledgers and their merge contract together. This
+    // upgrades repositories initialized before union attributes were added.
+    let mut command = std::process::Command::new("git");
+    command.arg("add").arg("--").arg(&trx_dir);
+    if attributes_need_update {
+        command.arg(&attributes_path);
+    }
+    let output = command.output()?;
 
     if !output.status.success() {
         bail!(

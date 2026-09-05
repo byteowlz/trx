@@ -46,12 +46,13 @@ fn doctor_fix_installs_missing_gitattributes_entries() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "installed 2 missing trx merge attribute entries",
+            "installed 3 missing trx merge attribute entries",
         ));
 
     let attrs = fs::read_to_string(temp.path().join(".gitattributes")).unwrap();
     assert!(attrs.contains(".trx/issues.jsonl text eol=lf merge=union"));
     assert!(attrs.contains(".trx/events.jsonl text eol=lf merge=union"));
+    assert!(attrs.contains(".trx/verifications.jsonl text eol=lf merge=union"));
 
     trx(temp.path())
         .arg("doctor")
