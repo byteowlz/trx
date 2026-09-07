@@ -99,7 +99,7 @@ trx dep rm ID --blocks OTHER
 trx verify add ID [--run-id R] --status S [--revision SHA] [--artifact URI]...
 trx verify list ID
 trx verify show ID RUN_ID
-trx sync [-m MESSAGE]          # Git add + commit .trx/
+trx sync [-m MESSAGE]          # Install merge attributes; commit trx state
 
 # Migration
 trx import .beads/issues.jsonl [--prefix PREFIX]
@@ -126,8 +126,10 @@ trx supports importing from beads and uses a compatible JSONL format:
 
 ## Conflict Resolution
 
-trx relies on normal git text merge behavior for `.trx/issues.jsonl`.
-If merge conflicts occur, resolve them in the JSONL file and run `trx sync`.
+`trx sync` installs and commits Git's union-merge attributes for the append-only
+issue, event, and verification ledgers. Independent appends then merge without
+manual JSONL conflict editing. Invalid JSON and semantic identity conflicts are
+still reported rather than guessed.
 
 ## Development
 

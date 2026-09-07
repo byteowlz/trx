@@ -222,7 +222,7 @@ enum Commands {
         command: PlanCommands,
     },
 
-    /// Git add and commit .trx/
+    /// Install merge attributes, then Git add and commit trx state
     Sync {
         /// Commit message
         #[arg(short, long)]

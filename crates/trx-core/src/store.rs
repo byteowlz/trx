@@ -20,9 +20,10 @@ const LOCK_FILE: &str = "issues.lock";
 const CONFIG_FILE: &str = "config.toml";
 const GITATTRIBUTES_FILE: &str = ".gitattributes";
 /// Git attributes required for clean merges of trx append-only JSONL logs.
-pub const TRX_GITATTRIBUTES_LINES: [&str; 2] = [
+pub const TRX_GITATTRIBUTES_LINES: [&str; 3] = [
     ".trx/issues.jsonl text eol=lf merge=union",
     ".trx/events.jsonl text eol=lf merge=union",
+    ".trx/verifications.jsonl text eol=lf merge=union",
 ];
 const LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(25);

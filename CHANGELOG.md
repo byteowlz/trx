@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Fixed
+
+- `trx sync` now installs and commits union-merge attributes for all append-only ledgers, upgrading older repositories before concurrent agents create avoidable JSONL conflicts.
+
 ## [0.7.0] - 2026-08-27
 
 ### Added
