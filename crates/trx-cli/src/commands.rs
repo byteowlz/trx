@@ -1427,15 +1427,6 @@ pub fn ready(
         .collect();
     let graph = IssueGraph::from_issues(&open_issues);
     let ready_all = graph.ready_issues(&open_issues);
-    let ready_ids: std::collections::HashSet<_> = ready_all.iter().map(|i| i.id.as_str()).collect();
-
-    // Partition open issues into ready vs. truly-blocked BEFORE filtering, so
-    // a filter that hides a ready issue does not misclassify it as blocked.
-    let blocked_all: Vec<_> = open_issues
-        .iter()
-        .filter(|i| !ready_ids.contains(i.id.as_str()))
-        .copied()
-        .collect();
 
     let type_filter = match issue_type {
         Some(s) => Some(s.parse::<IssueType>()?),
@@ -1461,7 +1452,6 @@ pub fn ready(
     };
 
     let mut ready: Vec<&Issue> = ready_all.into_iter().filter(matches).collect();
-    let blocked: Vec<&Issue> = blocked_all.into_iter().filter(matches).collect();
     ready.sort_by_key(|a| a.priority);
     if let Some(n) = limit {
         ready.truncate(n);
@@ -1493,29 +1483,6 @@ pub fn ready(
                 issue.issue_type.to_string().blue(),
                 issue.title
             );
-        }
-
-        if !blocked.is_empty() {
-            println!();
-            println!("{}", "Blocked issues:".bold());
-            for issue in &blocked {
-                let blockers: Vec<String> = issue
-                    .dependencies
-                    .iter()
-                    .filter(|d| d.dep_type == DependencyType::Blocks)
-                    .filter(|d| open_issues.iter().any(|i| i.id == d.depends_on_id))
-                    .map(|d| d.depends_on_id.clone())
-                    .collect();
-                println!(
-                    "{} [P{}] [{}] - {} {} {}",
-                    issue.id.cyan(),
-                    issue.priority,
-                    issue.issue_type.to_string().blue(),
-                    issue.title,
-                    "blocked by".red(),
-                    blockers.join(", ").red()
-                );
-            }
         }
     }
 

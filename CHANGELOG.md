@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `trx dep block` accepts repeated `--by` flags; `trx ready` no longer prints blocked issues in its human-readable output.
 - `trx sync` now installs and commits union-merge attributes for all append-only ledgers, upgrading older repositories before concurrent agents create avoidable JSONL conflicts.
 
 ## [0.7.0] - 2026-08-27

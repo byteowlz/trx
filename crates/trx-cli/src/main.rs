@@ -598,9 +598,9 @@ enum DepCommands {
         /// The issue that is blocked
         id: String,
 
-        /// Blocker issue ID(s), comma-separated
-        #[arg(long)]
-        by: String,
+        /// Blocker issue ID(s); repeat --by or use comma-separated IDs
+        #[arg(long, required = true)]
+        by: Vec<String>,
     },
 
     /// Remove blockers from an issue
@@ -733,7 +733,7 @@ fn main() -> Result<()> {
             limit,
         } => commands::ready(issue_type, priority, label, limit, cli.json),
         Commands::Dep { command } => match command {
-            DepCommands::Block { id, by } => commands::dep_block(&id, &by, cli.json),
+            DepCommands::Block { id, by } => commands::dep_block(&id, &by.join(","), cli.json),
             DepCommands::Unblock { id, by } => commands::dep_unblock(&id, &by, cli.json),
             DepCommands::Tree { id } => commands::dep_tree(&id, cli.json),
         },
