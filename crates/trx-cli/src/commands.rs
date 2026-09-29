@@ -3321,6 +3321,12 @@ pub fn info(json: bool) -> Result<()> {
             ("request_id", ctx.request_id.as_deref()),
             ("correlation_id", ctx.correlation_id.as_deref()),
             ("sandbox_profile", ctx.sandbox_profile.as_deref()),
+            ("agent_id", ctx.agent_id.as_deref()),
+            ("agent_address", ctx.agent_address.as_deref()),
+            ("machine_id", ctx.machine_id.as_deref()),
+            ("multiplexer", ctx.multiplexer.as_deref()),
+            ("node_hostname", ctx.node_hostname.as_deref()),
+            ("os_arch", ctx.os_arch.as_deref()),
         ];
         for (k, v) in rows {
             if let Some(v) = v {

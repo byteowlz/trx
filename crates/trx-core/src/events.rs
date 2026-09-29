@@ -110,6 +110,28 @@ pub struct Event {
     pub request_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub correlation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub machine_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub multiplexer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_hostname: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub os_arch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readable_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sandbox_profile: Option<String>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub changes: Vec<FieldChange>,
@@ -136,6 +158,17 @@ impl Event {
             model: ctx.model.clone(),
             request_id: ctx.request_id.clone(),
             correlation_id: ctx.correlation_id.clone(),
+            agent_id: ctx.agent_id.clone(),
+            agent_address: ctx.agent_address.clone(),
+            machine_id: ctx.machine_id.clone(),
+            multiplexer: ctx.multiplexer.clone(),
+            node_hostname: ctx.node_hostname.clone(),
+            os_arch: ctx.os_arch.clone(),
+            version: ctx.version.clone(),
+            run_mode: ctx.run_mode.clone(),
+            readable_id: ctx.readable_id.clone(),
+            workspace_path: ctx.workspace_path.clone(),
+            sandbox_profile: ctx.sandbox_profile.clone(),
             changes: Vec::new(),
             note: None,
         }
@@ -415,6 +448,39 @@ mod tests {
         assert_eq!(read[1].action, EventAction::Closed);
         assert_eq!(read[1].note.as_deref(), Some("done"));
         assert_eq!(read[0].user_id.as_deref(), Some("u1"));
+    }
+
+    #[test]
+    fn provenance_round_trips_and_old_events_remain_readable() {
+        let dir = TempDir::new().unwrap();
+        let log = EventLog::at(dir.path());
+        let ctx = AgentCtx {
+            agent_id: Some("agent-1".into()),
+            machine_id: Some("machine-1".into()),
+            multiplexer: Some("herdr".into()),
+            os_arch: Some("linux/amd64".into()),
+            harness_session_id: Some("session-1".into()),
+            ..Default::default()
+        };
+        for action in [
+            EventAction::Created,
+            EventAction::Updated,
+            EventAction::Closed,
+        ] {
+            log.append(&Event::new("trx-abc1", action, &ctx)).unwrap();
+        }
+        let events = log.read_all().unwrap();
+        assert_eq!(events.len(), 3);
+        for event in events {
+            assert_eq!(event.agent_id.as_deref(), Some("agent-1"));
+            assert_eq!(event.machine_id.as_deref(), Some("machine-1"));
+            assert_eq!(event.harness_session_id.as_deref(), Some("session-1"));
+            assert_eq!(event.multiplexer.as_deref(), Some("herdr"));
+            assert_eq!(event.os_arch.as_deref(), Some("linux/amd64"));
+        }
+        let old = serde_json::json!({"id":"e", "issue_id":"trx-abc1", "action":"created", "timestamp":"2026-01-01T00:00:00Z"});
+        let old: Event = serde_json::from_value(old).unwrap();
+        assert!(old.agent_id.is_none() && old.machine_id.is_none());
     }
 
     #[test]

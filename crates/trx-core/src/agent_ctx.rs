@@ -71,6 +71,25 @@ pub struct AgentCtx {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub correlation_id: Option<String>,
 
+    /// Agent identity within the multiplexer
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// Address of the agent process
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_address: Option<String>,
+    /// Stable machine identity
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub machine_id: Option<String>,
+    /// Multiplexer name
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub multiplexer: Option<String>,
+    /// Hostname of the agent node
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_hostname: Option<String>,
+    /// OS and architecture
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub os_arch: Option<String>,
+
     /// Active sandbox profile (observability hint)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sandbox_profile: Option<String>,
@@ -97,6 +116,12 @@ impl AgentCtx {
             request_id: read("AGENT_CTX_REQUEST_ID"),
             correlation_id: read("AGENT_CTX_CORRELATION_ID"),
             sandbox_profile: read("AGENT_CTX_SANDBOX_PROFILE"),
+            agent_id: read("AGENT_CTX_AGENT_ID"),
+            agent_address: read("AGENT_CTX_AGENT_ADDRESS"),
+            machine_id: read("AGENT_CTX_MACHINE_ID"),
+            multiplexer: read("AGENT_CTX_MULTIPLEXER"),
+            node_hostname: read("AGENT_CTX_NODE_HOSTNAME"),
+            os_arch: read("AGENT_CTX_OS_ARCH"),
         }
     }
 
@@ -118,6 +143,12 @@ impl AgentCtx {
             && self.request_id.is_none()
             && self.correlation_id.is_none()
             && self.sandbox_profile.is_none()
+            && self.agent_id.is_none()
+            && self.agent_address.is_none()
+            && self.machine_id.is_none()
+            && self.multiplexer.is_none()
+            && self.node_hostname.is_none()
+            && self.os_arch.is_none()
     }
 
     /// Stable session ids for indexing/dedup. Includes platform and harness ids
@@ -164,6 +195,12 @@ mod tests {
         "AGENT_CTX_REQUEST_ID",
         "AGENT_CTX_CORRELATION_ID",
         "AGENT_CTX_SANDBOX_PROFILE",
+        "AGENT_CTX_AGENT_ID",
+        "AGENT_CTX_AGENT_ADDRESS",
+        "AGENT_CTX_MACHINE_ID",
+        "AGENT_CTX_MULTIPLEXER",
+        "AGENT_CTX_NODE_HOSTNAME",
+        "AGENT_CTX_OS_ARCH",
     ];
 
     /// Helper that replaces all AGENT_CTX vars, runs a closure, and restores.
@@ -225,6 +262,10 @@ mod tests {
                 ("AGENT_CTX_PLATFORM_NAME", "oqto"),
                 ("AGENT_CTX_USER_ID", "u_123"),
                 ("AGENT_CTX_PLATFORM_SESSION_ID", "sess_8f"),
+                ("AGENT_CTX_AGENT_ID", "agent-1"),
+                ("AGENT_CTX_MACHINE_ID", "machine-1"),
+                ("AGENT_CTX_MULTIPLEXER", "herdr"),
+                ("AGENT_CTX_OS_ARCH", "linux/amd64"),
             ],
             || {
                 let ctx = AgentCtx::from_env();
@@ -232,6 +273,10 @@ mod tests {
                 assert_eq!(ctx.platform.as_deref(), Some("oqto"));
                 assert_eq!(ctx.user_id.as_deref(), Some("u_123"));
                 assert_eq!(ctx.platform_session_id.as_deref(), Some("sess_8f"));
+                assert_eq!(ctx.agent_id.as_deref(), Some("agent-1"));
+                assert_eq!(ctx.machine_id.as_deref(), Some("machine-1"));
+                assert_eq!(ctx.multiplexer.as_deref(), Some("herdr"));
+                assert_eq!(ctx.os_arch.as_deref(), Some("linux/amd64"));
                 assert!(!ctx.is_empty());
             },
         );

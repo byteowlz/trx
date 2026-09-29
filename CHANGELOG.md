@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## [0.7.1] - 2026-09-29
+
+### Added
+
+- Persist available agent, machine, multiplexer, host, OS, and remaining AGENT_CTX metadata on new issue events; show the new identity fields in `trx info`. Historical events remain unchanged.
+
 ### Fixed
 
 - `trx dep block` accepts repeated `--by` flags; `trx ready` no longer prints blocked issues in its human-readable output.
