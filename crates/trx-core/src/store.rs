@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 const TRX_DIR: &str = ".trx";
 const ISSUES_FILE: &str = "issues.jsonl";
-const LOCK_FILE: &str = "issues.lock";
+pub(crate) const LOCK_FILE: &str = "issues.lock";
 const CONFIG_FILE: &str = "config.toml";
 const GITATTRIBUTES_FILE: &str = ".gitattributes";
 /// Git attributes required for clean merges of trx append-only JSONL logs.
@@ -482,11 +482,30 @@ fn parse_prefix(content: &str) -> Option<String> {
     None
 }
 
-struct StoreLock {
+pub(crate) struct StoreLock {
     path: PathBuf,
 }
 
 impl StoreLock {
+    /// Acquire or `None` when the lock is held elsewhere. Non-blocking:
+    /// callers treat a busy store as "skip, retry later" instead of failing.
+    pub(crate) fn try_acquire(path: PathBuf) -> Result<Option<Self>> {
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                writeln!(
+                    file,
+                    "pid={} acquired_at={}",
+                    std::process::id(),
+                    chrono::Utc::now()
+                )?;
+                file.sync_all()?;
+                Ok(Some(Self { path }))
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
+            Err(err) => Err(Error::Io(err)),
+        }
+    }
+
     fn acquire(path: PathBuf) -> Result<Self> {
         let start = Instant::now();
         loop {
@@ -522,6 +541,12 @@ impl Drop for StoreLock {
     }
 }
 
+/// Emit a warning on stderr (mirrors mmry's `mmry: warning:` convention so
+/// agents get feedback from best-effort background operations).
+pub(crate) fn warn(message: &str) {
+    eprintln!("trx: warning: {message}");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -530,11 +555,13 @@ mod tests {
     use std::sync::{Arc, Barrier};
 
     fn init_temp_store(root: &Path) -> Store {
-        let old_cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(root).unwrap();
-        let store = Store::init("trx").unwrap();
-        std::env::set_current_dir(old_cwd).unwrap();
-        store
+        // Lay out the store directly instead of chdir+Store::init: current_dir
+        // is process-global and other tests chdir in parallel.
+        fs::create_dir_all(root.join(TRX_DIR)).unwrap();
+        fs::write(root.join(TRX_DIR).join(CONFIG_FILE), "prefix = \"trx\"\n").unwrap();
+        fs::write(root.join(TRX_DIR).join(ISSUES_FILE), "").unwrap();
+        Store::ensure_merge_attributes(root).unwrap();
+        Store::open_at(root.to_path_buf()).unwrap()
     }
 
     fn write_issues_log(root: &Path, issues: &[Issue]) {
@@ -693,10 +720,15 @@ mod tests {
     #[test]
     fn test_concurrent_creates_are_serialized_without_lost_issues() {
         let temp = tempfile::tempdir().unwrap();
-        let old_cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(temp.path()).unwrap();
-        Store::init("trx").unwrap();
-        std::env::set_current_dir(old_cwd).unwrap();
+        // Direct layout (no chdir): current_dir is process-global and other
+        // tests chdir in parallel.
+        fs::create_dir_all(temp.path().join(TRX_DIR)).unwrap();
+        fs::write(
+            temp.path().join(TRX_DIR).join(CONFIG_FILE),
+            "prefix = \"trx\"\n",
+        )
+        .unwrap();
+        fs::write(temp.path().join(TRX_DIR).join(ISSUES_FILE), "").unwrap();
 
         let root = temp.path().to_path_buf();
         let barrier = Arc::new(Barrier::new(8));

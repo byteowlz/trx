@@ -1,5 +1,5 @@
 //! End-to-end tests for the optional central store (epic trx-a1s8, slices
-//! .3/.4): `trx central init`, `trx store init --remote`, `trx store sync`,
+//! .3/.4): `trx central init`, `trx store sync init --remote`, `trx store sync [status|pull|push]`,
 //! and automatic pull at open / commit+push at exit.
 
 use std::path::Path;
@@ -62,6 +62,69 @@ fn init_git_repo(path: &Path) {
     std::fs::write(path.join("file.txt"), "hello\n").unwrap();
     git(path, &["add", "."]);
     git(path, &["commit", "-q", "-m", "initial"]);
+}
+
+#[test]
+fn central_init_dry_run_writes_nothing() {
+    let env = Env::new();
+    let base = tempfile::tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let store = base.path().join("store");
+    init_git_repo(&repo);
+
+    repo_cmd(&env, &repo).args(["init"]).assert().success();
+
+    // Dry run on a fresh checkout: reports the plan, writes nothing.
+    repo_cmd(&env, &repo)
+        .args(["central", "init", "--dry-run", "--store-root"])
+        .arg(&store)
+        .assert()
+        .success()
+        .stdout(contains("dry run — nothing written"))
+        .stdout(contains("identity:      git:"));
+    assert!(!store.exists(), "dry run must not create the store");
+    assert!(
+        !repo.join(".trx/central").exists(),
+        "dry run must not write the marker"
+    );
+
+    // JSON schema includes the plan fields.
+    repo_cmd(&env, &repo)
+        .args(["central", "init", "--dry-run", "--json", "--store-root"])
+        .arg(&store)
+        .assert()
+        .success()
+        .stdout(contains("\"planned_ledger\""));
+    assert!(!store.exists());
+}
+
+#[test]
+fn config_override_must_exist_and_is_used() {
+    let env = Env::new();
+    let base = tempfile::tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let store = base.path().join("store");
+    let missing = base.path().join("missing-config.toml");
+    let custom = base.path().join("custom-config.toml");
+    std::fs::write(&custom, format!("store_root = \"{}\"\n", store.display())).unwrap();
+    init_git_repo(&repo);
+    repo_cmd(&env, &repo).args(["init"]).assert().success();
+
+    // A selected override that does not exist is an error (mmry parity).
+    repo_cmd(&env, &repo)
+        .env("TRX_CONFIG", &missing)
+        .args(["central", "init"])
+        .assert()
+        .failure()
+        .stderr(contains("does not exist"));
+
+    // A valid override is honored: the store lands at the custom root.
+    repo_cmd(&env, &repo)
+        .env("TRX_CONFIG", &custom)
+        .args(["central", "init"])
+        .assert()
+        .success();
+    assert!(store.join("repos").is_dir());
 }
 
 #[test]
@@ -185,7 +248,7 @@ fn store_sync_connects_two_machines_and_drains_offline_pending() {
     git(&remote, &["init", "-q", "--bare", "-b", "main"]);
     repo_cmd(&env, &repo)
         .env("TRX_STORE_ROOT", &store)
-        .args(["store", "init", "--remote"])
+        .args(["store", "sync", "init", "--remote"])
         .arg(remote.join(".").to_str().unwrap())
         .assert()
         .success()

@@ -86,15 +86,32 @@ pub struct GlobalConfig {
 }
 
 impl GlobalConfig {
-    /// Path of the global config file.
+    /// Path of the global config file. `TRX_CONFIG` (or the `--config` flag,
+    /// which maps to it) selects an alternate file, which must exist when
+    /// given — parity with mmry's `--config`/`MMRY_CONFIG`.
     pub fn path() -> crate::Result<PathBuf> {
+        if let Ok(path) = std::env::var("TRX_CONFIG") {
+            return Ok(PathBuf::from(path));
+        }
         Ok(paths::config_base()?.join("trx").join("config.toml"))
     }
 
-    /// Load the global config; a missing file yields the default.
+    /// True when an alternate config file was explicitly selected.
+    pub fn override_active() -> bool {
+        std::env::var("TRX_CONFIG").is_ok()
+    }
+
+    /// Load the global config; a missing default file yields the default, a
+    /// missing *overridden* file is an error.
     pub fn load() -> crate::Result<Self> {
         let path = Self::path()?;
         if !path.is_file() {
+            if Self::override_active() {
+                return Err(crate::Error::Other(format!(
+                    "config override {} does not exist",
+                    path.display()
+                )));
+            }
             return Ok(Self::default());
         }
         let content = std::fs::read_to_string(&path)?;

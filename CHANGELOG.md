@@ -7,16 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Changed
+
+- Central-store CLI aligned with mmry's flag surface (byteowlz cli-flag-parity): `trx store sync init --remote URL` replaces `trx store init --remote` (mirrors `mmry sync init --remote` while keeping repo-local `trx sync` untouched); new global `--config PATH` / `TRX_CONFIG` selects the global config file, which must exist when given (parity with `--config`/`MMRY_CONFIG`); `trx central init --dry-run` prints the plan (store, identity, planned ledger, shadowed-issue count) without writing anything.
+- Duplicate central-repo directories of the same identity are merged only under an exclusive lock; a duplicate held by a concurrent writer is left in place and merged on a later registration instead of racing its writer.
+- Automatic central-store sync failures now surface as `trx: warning: sync: ...` on stderr (mmry's warning convention) in addition to the machine-local sync state.
+
 ### Removed
 
 - `trx purge-beads`: the legacy `.beads` cleanup command is gone. Delete the directory yourself (`rm -rf .beads`) after importing; `trx import` is unaffected.
 
 ### Added
 
-- Central store CLI (slices trx-a1s8.3/.4): `trx central init [--store NAME | --store-root PATH]` opts a checkout (including fresh clones and worktrees) into central mode and records the store in `.trx/central`; `trx central status` shows mode, identity, ledger location and sync summary; `trx store init --remote URL` makes the store a synced git repository; `trx store sync [status|pull|push]` syncs it manually (commit → pull → push). Global `--store`/`--store-root` flags (and `TRX_STORE`/`TRX_STORE_ROOT`) select stores for any command.
-- Automatic sync for central stores (opt-in via `trx store init`): pull at first store access (throttled to once per 30s), commit+push at command exit; ledgers union-merge via the store's `.gitattributes` (`local/`, locks and temp files stay machine-local); offline or rejected pushes keep everything committed locally and report pending commits, retrying after one pull; metadata conflicts abort the sync without losing data; never force-pushes or resets.
+- Central store CLI (slices trx-a1s8.3/.4): `trx central init [--store NAME | --store-root PATH]` opts a checkout (including fresh clones and worktrees) into central mode and records the store in `.trx/central`; `trx central status` shows mode, identity, ledger location and sync summary; `trx store sync init --remote URL` makes the store a synced git repository; `trx store sync [status|pull|push]` syncs it manually (commit → pull → push). Global `--store`/`--store-root` flags (and `TRX_STORE`/`TRX_STORE_ROOT`) select stores for any command.
+- Automatic sync for central stores (opt-in via `trx store sync init`): pull at first store access (throttled to once per 30s), commit+push at command exit; ledgers union-merge via the store's `.gitattributes` (`local/`, locks and temp files stay machine-local); offline or rejected pushes keep everything committed locally and report pending commits, retrying after one pull; metadata conflicts abort the sync without losing data; never force-pushes or resets.
 - Repo-local mode is unchanged and remains the default; `trx doctor` reports the active mode and central identity.
-
 - Foundation of the optional central store (epic trx-a1s8, slices trx-a1s8.1/.2): a new `trx-core` `central` module with a per-user store at `$XDG_DATA_HOME/trx` (`repos/<name>--<id>/` ledgers plus a machine-local `local/checkouts.json`), repository identity from the git root commit (`git:<sha>`, worktrees share the ledger; `path:<canonical>` fallback), duplicate-directory merging by id, and a `.trx/central` mode marker. `Store::open_at` routes the authoritative ledger (issues, events, verifications) to the central store when the marker is present; without it, behavior is unchanged. Global per-user config at `~/.config/trx/config.toml` (store root, named stores via `--store`/`TRX_STORE`, `TRX_STORE_ROOT` override, migrate policy, sync settings, scan roots); repo-local `.trx/config.toml` can never redirect the store. `trx doctor` reports mode/identity; `trx sync` refuses repo-local syncing in central mode.
 
 ## [0.7.1] - 2026-09-29

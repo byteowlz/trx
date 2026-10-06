@@ -25,6 +25,7 @@
 //! store per repository is ever read or written.
 
 use crate::global_config::GlobalConfig;
+use crate::store::{LOCK_FILE, StoreLock};
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -294,13 +295,19 @@ impl CentralStore {
 
     /// Merge other directories with `primary`'s identity into it, then remove
     /// them. All trx files are append-only JSONL resolved by id on load, so
-    /// concatenation is a correct merge.
+    /// concatenation is a correct merge. A duplicate that is currently locked
+    /// by another writer is left in place and merged on a later registration —
+    /// never merged or deleted under an active writer.
     fn merge_duplicates(&self, primary: &CentralRepo) -> Result<Vec<PathBuf>> {
         let mut removed = Vec::new();
         for other in self.repos()? {
             if other.record.identity != primary.record.identity || other.dir == primary.dir {
                 continue;
             }
+            let lock_path = other.dir.join(LOCK_FILE);
+            let Some(_lock) = StoreLock::try_acquire(lock_path)? else {
+                continue;
+            };
             merge_ledger_files(&other, primary)?;
             fs::remove_dir_all(&other.dir)?;
             removed.push(other.dir);
@@ -549,6 +556,58 @@ mod tests {
             checkouts.get(&checkout.identity).unwrap(),
             &vec![checkout.root.clone()]
         );
+    }
+
+    #[test]
+    fn test_busy_duplicate_dir_is_skipped_not_merged_or_deleted() {
+        let source = tempfile::tempdir().unwrap();
+        init_git_repo(source.path());
+        let clone_parent = tempfile::tempdir().unwrap();
+        git(
+            clone_parent.path(),
+            &[
+                "clone",
+                "-q",
+                source.path().join(".").to_str().unwrap(),
+                "alpha",
+            ],
+        );
+        let store = CentralStore::open_at(source.path().join("central-store"));
+        let checkout = Checkout::at(&clone_parent.path().join("alpha")).unwrap();
+        let repo = store.register(&checkout).unwrap();
+
+        // A second, differently-named dir with the same identity, currently
+        // locked by another writer.
+        let dup = store.root.join("repos").join("renamed--zzzz");
+        fs::create_dir_all(&dup).unwrap();
+        fs::write(
+            dup.join(REGISTRY_FILE),
+            serde_json::to_string_pretty(&RepoRecord {
+                identity: checkout.identity.clone(),
+                name: "renamed".into(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(dup.join(ISSUES_FILE), "{\"id\":\"x-1\"}\n").unwrap();
+        let lock = StoreLock::try_acquire(dup.join(LOCK_FILE))
+            .unwrap()
+            .unwrap();
+
+        let again = store.register(&checkout).unwrap();
+        assert_eq!(again.dir, repo.dir, "primary registration unaffected");
+        assert!(dup.is_dir(), "locked duplicate must be left in place");
+        assert!(
+            !repo.issues_path().exists(),
+            "nothing merged under an active writer"
+        );
+        drop(lock);
+
+        // Once the writer is gone, the next registration merges and removes it.
+        store.register(&checkout).unwrap();
+        assert!(!dup.exists(), "unlocked duplicate merged and removed");
+        let content = fs::read_to_string(repo.issues_path()).unwrap();
+        assert!(content.contains("\"x-1\""));
     }
 
     #[test]

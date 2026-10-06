@@ -27,6 +27,10 @@ struct Cli {
     /// Central store root override (env TRX_STORE_ROOT)
     #[arg(long, global = true, value_name = "PATH")]
     store_root: Option<String>,
+
+    /// Global config file override; must exist when given (env TRX_CONFIG)
+    #[arg(long, global = true, env = "TRX_CONFIG", value_name = "PATH")]
+    config: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -490,19 +494,17 @@ enum Commands {
 enum CentralCommands {
     /// Enable central mode for this repository (issues live in the
     /// per-user central store instead of .trx/)
-    Init,
+    Init {
+        /// Show what would happen without writing anything
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Show mode, identity, ledger location and sync summary
     Status,
 }
 
 #[derive(Subcommand)]
 enum StoreCommands {
-    /// Make the central store a synced git repository (opt-in)
-    Init {
-        /// Remote URL to sync with (git transport, your credentials)
-        #[arg(long)]
-        remote: String,
-    },
     /// Sync the store: commit → pull → push (offline-safe)
     Sync {
         #[command(subcommand)]
@@ -512,6 +514,13 @@ enum StoreCommands {
 
 #[derive(Subcommand)]
 enum StoreSyncAction {
+    /// Make the store a synced git repository (opt-in; mirrors
+    /// `mmry sync init --remote`)
+    Init {
+        /// Remote URL to sync with (git transport, your credentials)
+        #[arg(long)]
+        remote: String,
+    },
     /// Show remote, pending commits and last pull/push
     Status,
     /// Pull only (merge; union rules for ledgers)
@@ -860,18 +869,15 @@ fn run(cli: Cli) -> Result<()> {
             no_commit,
         } => commands::sync(message, dry_run, no_commit),
         Commands::Central { command } => match command {
-            CentralCommands::Init => {
-                store_cmds::central_init(cli.store.as_deref(), cli.store_root.as_deref(), cli.json)
-            }
-            CentralCommands::Status => store_cmds::central_status(cli.json),
-        },
-        Commands::Store { command } => match command {
-            StoreCommands::Init { remote } => store_cmds::store_init(
-                &remote,
+            CentralCommands::Init { dry_run } => store_cmds::central_init(
+                dry_run,
                 cli.store.as_deref(),
                 cli.store_root.as_deref(),
                 cli.json,
             ),
+            CentralCommands::Status => store_cmds::central_status(cli.json),
+        },
+        Commands::Store { command } => match command {
             StoreCommands::Sync { action } => store_cmds::store_sync(
                 action,
                 cli.store.as_deref(),

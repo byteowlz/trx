@@ -155,6 +155,12 @@ fn save_state(store_root: &Path, state: &SyncState) -> Result<()> {
     Ok(())
 }
 
+/// Emit a warning on stderr (mirrors mmry's `mmry: warning:` convention so
+/// agents get feedback from best-effort background operations).
+fn warn(message: &str) {
+    eprintln!("trx: warning: sync: {message}");
+}
+
 fn record_error(store_root: &Path, error: &str) {
     let mut state = load_state(store_root);
     state.last_error = Some(error.to_string());
@@ -385,7 +391,7 @@ pub fn full_sync(store_root: &Path, cfg: &SyncConfig) -> Result<SyncOutcome> {
     let mut outcome = SyncOutcome::default();
     if !is_git_repo(store_root) {
         return Err(Error::Other(format!(
-            "store {} is not a git repository; run 'trx store init --remote URL' first",
+            "store {} is not a git repository; run 'trx store sync init --remote URL' first",
             store_root.display()
         )));
     }
@@ -549,7 +555,9 @@ pub fn final_sync() {
     if !is_git_repo(store_root) {
         return;
     }
-    let _ = full_sync(store_root, cfg);
+    if let Err(error) = full_sync(store_root, cfg) {
+        warn(&error.to_string());
+    }
 }
 
 /// Automatic pull at first central-store access in a process: commits crash
@@ -575,8 +583,12 @@ pub fn auto_pull_on_open(store_root: &Path, cfg: &SyncConfig) {
     if pulled_recently {
         return;
     }
-    if cfg.auto_commit {
-        let _ = commit_all(store_root, cfg, "auto: pending writes before pull");
+    if cfg.auto_commit
+        && let Err(error) = commit_all(store_root, cfg, "auto: pending writes before pull")
+    {
+        warn(&format!(
+            "could not commit pending writes before pull: {error}"
+        ));
     }
     match pull(store_root, cfg) {
         Ok(outcome) => {
@@ -587,7 +599,11 @@ pub fn auto_pull_on_open(store_root: &Path, cfg: &SyncConfig) {
             }
             let _ = save_state(store_root, &state);
         }
-        Err(error) => record_error(store_root, &error.to_string()),
+        Err(error) => {
+            // Network-level failures are expected offline; still surface them.
+            warn(&error.to_string());
+            record_error(store_root, &error.to_string());
+        }
     }
 }
 

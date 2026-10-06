@@ -2,7 +2,7 @@
 //!
 //! - `trx central init` — opt the current repository into central mode
 //! - `trx central status` — mode, identity, ledger location, sync summary
-//! - `trx store init --remote URL` — make the store a synced git repository
+//! - `trx store sync init --remote URL` — make the store a synced git repository
 //! - `trx store sync [status|pull|push]` — manual sync (commit→pull→push)
 
 use anyhow::{Result, bail};
@@ -20,9 +20,56 @@ fn resolve_store_root(
 }
 
 /// Opt the current repository into central mode.
-pub fn central_init(store: Option<&str>, store_root: Option<&str>, json: bool) -> Result<()> {
+pub fn central_init(
+    dry_run: bool,
+    store: Option<&str>,
+    store_root: Option<&str>,
+    json: bool,
+) -> Result<()> {
     let config = GlobalConfig::load()?;
     let resolved = resolve_store_root(&config, store, store_root)?;
+
+    // Dry run: plan only — no .trx/ creation, no registration, no marker.
+    // A missing .trx is part of the plan ("would create") instead of an error.
+    let repo_root = match Store::current_root() {
+        Ok(root) => root,
+        Err(_) if dry_run => std::env::current_dir()?,
+        Err(error) => return Err(error.into()),
+    };
+    let checkout = Checkout::at(&repo_root)?;
+    let cs = CentralStore::open_at(resolved.clone());
+    let planned = cs.plan(&checkout)?;
+    let marker = central::read_marker(&repo_root)?;
+    let local_issue_count = local_ledger_issue_count(&repo_root)?;
+
+    if dry_run {
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "dry_run": true,
+                    "store_root": resolved.display().to_string(),
+                    "identity": checkout.identity,
+                    "planned_ledger": planned.dir.display().to_string(),
+                    "already_central": marker.is_some(),
+                    "local_issues_would_shadow": local_issue_count,
+                    "would_create_trx_dir": !repo_root.join(".trx").exists(),
+                })
+            );
+        } else {
+            println!("dry run — nothing written:");
+            println!("  store:         {}", resolved.display());
+            println!("  identity:      {}", checkout.identity);
+            println!("  ledger:        {}", planned.dir.display());
+            println!("  central now:   {}", marker.is_some());
+            println!("  local issues:  {local_issue_count}");
+            if local_issue_count > 0 {
+                println!("  (init refuses while a non-empty repo-local ledger exists)");
+            }
+        }
+        return Ok(());
+    }
+
     // Fresh clones/worktrees have no .trx/ yet: create the minimal checkout
     // state so central mode works with a single command.
     let trx_dir = std::path::Path::new(".trx");
@@ -40,17 +87,10 @@ pub fn central_init(store: Option<&str>, store_root: Option<&str>, json: bool) -
     // Refuse to shadow a non-empty repo-local ledger: migration lands with
     // `trx migrate` (epic trx-a1s8.5). Until then, enabling central mode on a
     // populated repo would hide its issues.
-    let local_issues = repo_root.join(".trx").join("issues.jsonl");
-    if local_issues.is_file() {
-        let count = std::fs::read_to_string(&local_issues)?
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .count();
-        if count > 0 {
-            bail!(
-                "The repo-local ledger has {count} issues. Enable central mode only after migrating them (`trx migrate`, coming in epic trx-a1s8.5) — refusing to shadow them now."
-            );
-        }
+    if local_issue_count > 0 {
+        bail!(
+            "The repo-local ledger has {local_issue_count} issues. Enable central mode only after migrating them (`trx migrate`, coming in epic trx-a1s8.5) — refusing to shadow them now."
+        );
     }
 
     let existing = central::read_marker(&repo_root)?;
@@ -75,7 +115,6 @@ pub fn central_init(store: Option<&str>, store_root: Option<&str>, json: bool) -
     }
 
     let cs = CentralStore::open_at(resolved.clone());
-    let checkout = Checkout::at(&repo_root)?;
     let repo = cs.register(&checkout)?;
     central::write_marker(&repo_root, store, Some(resolved.as_path()))?;
 
@@ -103,7 +142,9 @@ pub fn central_init(store: Option<&str>, store_root: Option<&str>, json: bool) -
         println!(
             "  This checkout now reads/writes the central store; the repo-local .trx/ is not touched."
         );
-        println!("  Cross-machine sync: trx store init --remote <URL>  (in the central store)");
+        println!(
+            "  Cross-machine sync: trx store sync init --remote <URL>  (in the central store)"
+        );
     }
     Ok(())
 }
@@ -173,26 +214,25 @@ pub fn central_status(json: bool) -> Result<()> {
                 println!("  last error: {error}");
             }
         } else {
-            println!("sync:     not initialized (trx store init --remote <URL>)");
+            println!("sync:     not initialized (trx store sync init --remote <URL>)");
         }
     }
     Ok(())
 }
 
-/// Make the central store a synced git repository.
-pub fn store_init(
-    remote: &str,
-    store: Option<&str>,
-    store_root: Option<&str>,
-    json: bool,
-) -> Result<()> {
-    let config = GlobalConfig::load()?;
-    let resolved = resolve_store_root(&config, store, store_root)?;
-    let outcome = sync::init_remote(&resolved, remote, &config.sync)?;
-    report_outcome(&resolved, &outcome, json)
+/// Non-empty line count of the checkout's repo-local issues.jsonl (0 when absent).
+fn local_ledger_issue_count(repo_root: &std::path::Path) -> Result<usize> {
+    let local_ledger = repo_root.join(".trx").join("issues.jsonl");
+    if !local_ledger.is_file() {
+        return Ok(0);
+    }
+    Ok(std::fs::read_to_string(&local_ledger)?
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count())
 }
 
-/// Manual sync: full (commit→pull→push) or a single action.
+/// Manual sync: init (opt-in git), full (commit→pull→push) or a single action.
 pub fn store_sync(
     action: Option<crate::StoreSyncAction>,
     store: Option<&str>,
@@ -201,14 +241,19 @@ pub fn store_sync(
 ) -> Result<()> {
     let config = GlobalConfig::load()?;
     let resolved = resolve_store_root(&config, store, store_root)?;
-    if !resolved.join(".git").exists() {
+    if !matches!(action, Some(crate::StoreSyncAction::Init { .. }))
+        && !resolved.join(".git").exists()
+    {
         bail!(
-            "Store {} is not a git repository. Run: trx store init --remote <URL>",
+            "Store {} is not a git repository. Run: trx store sync init --remote <URL>",
             resolved.display()
         );
     }
     let outcome = match action {
         None => sync::full_sync(&resolved, &config.sync)?,
+        Some(crate::StoreSyncAction::Init { remote }) => {
+            sync::init_remote(&resolved, &remote, &config.sync)?
+        }
         Some(crate::StoreSyncAction::Pull) => sync::pull(&resolved, &config.sync)?,
         Some(crate::StoreSyncAction::Push) => sync::push_only(&resolved, &config.sync)?,
         Some(crate::StoreSyncAction::Status) => {
