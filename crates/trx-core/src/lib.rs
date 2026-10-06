@@ -5,24 +5,29 @@
 //! v2 (Automerge) layouts are migrated transparently on the next mutation.
 
 pub mod agent_ctx;
+pub mod central;
 pub mod config;
 pub mod error;
 pub mod events;
+pub mod global_config;
 pub mod graph;
 pub mod id;
 pub mod issue;
 pub(crate) mod legacy_crdt;
+pub mod paths;
 pub mod service;
 pub mod store;
 pub mod verification;
 
 pub use agent_ctx::AgentCtx;
+pub use central::{CentralMarker, CentralRepo, CentralStore, Checkout, RepoRecord};
 pub use config::Config;
 pub use error::Error;
 pub use events::{
     Event, EventAction, EventLog, FieldChange, SessionSummary, diff_issue, enrich_issue,
     summarize_sessions,
 };
+pub use global_config::{GlobalConfig, MigratePolicy, RootScan, StoreDef, SyncConfig};
 pub use graph::IssueGraph;
 pub use id::generate_id;
 pub use issue::{Dependency, DependencyType, Issue, IssueType, Status};

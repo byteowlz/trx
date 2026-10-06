@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Added
+
+- Foundation of the optional central store (epic trx-a1s8, slices trx-a1s8.1/.2): a new `trx-core` `central` module with a per-user store at `$XDG_DATA_HOME/trx` (`repos/<name>--<id>/` ledgers plus a machine-local `local/checkouts.json`), repository identity from the git root commit (`git:<sha>`, worktrees share the ledger; `path:<canonical>` fallback), duplicate-directory merging by id, and a `.trx/central` mode marker. `Store::open_at` routes the authoritative ledger (issues, events, verifications) to the central store when the marker is present; without it, behavior is unchanged. Global per-user config at `~/.config/trx/config.toml` (store root, named stores via `--store`/`TRX_STORE`, `TRX_STORE_ROOT` override, migrate policy, sync settings, scan roots); repo-local `.trx/config.toml` can never redirect the store. `trx doctor` reports mode/identity; `trx sync` refuses repo-local syncing in central mode.
+
 ## [0.7.1] - 2026-09-29
 
 ### Added

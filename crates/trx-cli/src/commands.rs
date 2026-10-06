@@ -13,7 +13,7 @@ use trx_core::{
 /// never break the command — losing an audit entry is preferable to refusing
 /// the user's mutation.
 fn emit_event(store: &Store, event: Event) {
-    let log = EventLog::at(&store.trx_dir());
+    let log = EventLog::at(&store.ledger_dir());
     if let Err(e) = log.append(&event) {
         eprintln!("warning: failed to append event log: {}", e);
     }
@@ -99,6 +99,32 @@ pub fn doctor(fix: bool, json: bool) -> Result<()> {
         .parent()
         .ok_or_else(|| anyhow::anyhow!("invalid trx directory: {}", trx_dir.display()))?;
     let attrs_path = root.join(".gitattributes");
+
+    if store.is_central() {
+        let message = store.central_repo().map_or_else(
+            || "central mode".to_string(),
+            |repo| {
+                format!(
+                    "central mode: authoritative ledger at {} (identity {}) — repo-local .trx/ not read",
+                    repo.dir.display(),
+                    repo.record.identity
+                )
+            },
+        );
+        checks.push(DoctorCheck {
+            name: "central",
+            status: "ok",
+            message,
+            fixed: false,
+        });
+    } else {
+        checks.push(DoctorCheck {
+            name: "central",
+            status: "ok",
+            message: "repo-local mode: authoritative ledger in .trx/".to_string(),
+            fixed: false,
+        });
+    }
     let attrs_content = if attrs_path.exists() {
         std::fs::read_to_string(&attrs_path)?
     } else {
@@ -681,7 +707,7 @@ pub fn show(id: &str, json: bool) -> Result<()> {
         }
 
         // Add verification runs (best-effort: skip silently on read errors).
-        if let Ok(runs) = VerificationStore::at(&store.trx_dir()).for_issue(id)
+        if let Ok(runs) = VerificationStore::at(&store.ledger_dir()).for_issue(id)
             && !runs.is_empty()
         {
             obj.insert("verification".into(), serde_json::to_value(&runs)?);
@@ -747,7 +773,7 @@ pub fn show(id: &str, json: bool) -> Result<()> {
         }
 
         // Verification evidence (best-effort: skip silently on read errors).
-        if let Ok(runs) = VerificationStore::at(&store.trx_dir()).for_issue(id)
+        if let Ok(runs) = VerificationStore::at(&store.ledger_dir()).for_issue(id)
             && !runs.is_empty()
         {
             println!();
@@ -783,7 +809,7 @@ pub fn show(id: &str, json: bool) -> Result<()> {
 
         // Recent activity (best-effort: skip silently on read errors so we
         // never fail `show` because of a corrupt event log line).
-        if let Ok(events) = EventLog::at(&store.trx_dir()).read_all() {
+        if let Ok(events) = EventLog::at(&store.ledger_dir()).read_all() {
             let mut for_issue: Vec<&Event> = events.iter().filter(|e| e.issue_id == id).collect();
             for_issue.sort_by_key(|e| std::cmp::Reverse(e.timestamp));
             for_issue.truncate(5);
@@ -986,7 +1012,7 @@ fn check_verification_gate(store: &Store, issue_id: &str) -> std::result::Result
         return Ok(());
     }
 
-    let vstore = VerificationStore::at(&store.trx_dir());
+    let vstore = VerificationStore::at(&store.ledger_dir());
     let runs = vstore.read_all().unwrap_or_default();
     let current_revision = current_git_revision();
     let report = evaluate_close_gate(issue, &runs, vconfig, current_revision.as_deref());
@@ -1211,7 +1237,7 @@ pub fn verify_add(
         gaps,
     };
 
-    let vstore = VerificationStore::at(&store.trx_dir());
+    let vstore = VerificationStore::at(&store.ledger_dir());
 
     // Idempotent re-submission: same (issue, run_id) with equivalent content
     // is a no-op; a conflicting record under the same key fails clearly.
@@ -1274,7 +1300,7 @@ pub fn verify_list(issue_id: &str, limit: Option<usize>, json: bool) -> Result<(
     if store.get(issue_id).is_none() {
         bail!("Issue not found: {}", issue_id);
     }
-    let vstore = VerificationStore::at(&store.trx_dir());
+    let vstore = VerificationStore::at(&store.ledger_dir());
     let mut runs = vstore.for_issue(issue_id)?;
     if let Some(n) = limit {
         // Keep the most recent N (oldest-first order, drop from the front).
@@ -1350,7 +1376,7 @@ pub fn verify_show(issue_id: &str, run_id: &str, json: bool) -> Result<()> {
     if store.get(issue_id).is_none() {
         bail!("Issue not found: {}", issue_id);
     }
-    let vstore = VerificationStore::at(&store.trx_dir());
+    let vstore = VerificationStore::at(&store.ledger_dir());
     let run = vstore.find(issue_id, run_id)?.ok_or_else(|| {
         anyhow::anyhow!("Verification run not found: {} for {}", run_id, issue_id)
     })?;
@@ -3243,16 +3269,19 @@ pub fn info(json: bool) -> Result<()> {
     let store_info = match Store::open() {
         Ok(store) => {
             let trx_dir = store.trx_dir();
+            let ledger_dir = store.ledger_dir();
             let issues = store.list(true);
             let issue_count = issues.len();
             let open_count = issues.iter().filter(|i| i.status.is_open()).count();
             let closed_count = issues.iter().filter(|i| i.status.is_closed()).count();
-            let events_count = EventLog::at(&trx_dir)
+            let events_count = EventLog::at(&ledger_dir)
                 .read_all()
                 .map(|v| v.len())
                 .unwrap_or(0);
             Some(serde_json::json!({
                 "path": trx_dir.display().to_string(),
+                "ledger_path": ledger_dir.display().to_string(),
+                "central": store.is_central(),
                 "format": "jsonl",
                 "migrate_pending": store.migrate_pending(),
                 "issues": issue_count,
@@ -3443,7 +3472,7 @@ pub fn history(id: &str, limit: Option<usize>, json: bool) -> Result<()> {
     if store.get(id).is_none() {
         bail!("Issue not found: {}", id);
     }
-    let log = EventLog::at(&store.trx_dir());
+    let log = EventLog::at(&store.ledger_dir());
     let events = log.read_all()?;
     let filtered = filter_events(events, Some(id), None, None, None, None, None, limit);
 
@@ -3478,7 +3507,7 @@ pub fn events(
     json: bool,
 ) -> Result<()> {
     let store = Store::open()?;
-    let log = EventLog::at(&store.trx_dir());
+    let log = EventLog::at(&store.ledger_dir());
     let all = log.read_all()?;
 
     let action_parsed = match action {
@@ -3824,7 +3853,7 @@ pub fn log(
     json: bool,
 ) -> Result<()> {
     let store = Store::open()?;
-    let log = EventLog::at(&store.trx_dir());
+    let log = EventLog::at(&store.ledger_dir());
     let all = log.read_all()?;
 
     let action_parsed = match action {
@@ -3905,7 +3934,7 @@ pub fn sessions(
     json: bool,
 ) -> Result<()> {
     let store = Store::open()?;
-    let log = EventLog::at(&store.trx_dir());
+    let log = EventLog::at(&store.ledger_dir());
     let all = log.read_all()?;
 
     let since_parsed = match since {
@@ -4044,7 +4073,7 @@ fn truncate(s: &str, n: usize) -> String {
 
 pub fn stats(since: Option<String>, until: Option<String>, by: &str, json: bool) -> Result<()> {
     let store = Store::open()?;
-    let log = EventLog::at(&store.trx_dir());
+    let log = EventLog::at(&store.ledger_dir());
     let all = log.read_all()?;
 
     let since_dt = match since {
@@ -4279,7 +4308,7 @@ pub fn heatmap(
         bail!("--weeks must be between 1 and 104");
     }
     let store = Store::open()?;
-    let log = EventLog::at(&store.trx_dir());
+    let log = EventLog::at(&store.ledger_dir());
     let all = log.read_all()?;
 
     let since_dt = match since {
@@ -4474,7 +4503,7 @@ pub fn swimlane(
     json: bool,
 ) -> Result<()> {
     let store = Store::open()?;
-    let log = EventLog::at(&store.trx_dir());
+    let log = EventLog::at(&store.ledger_dir());
     let all = log.read_all()?;
 
     let since_dt = match since {

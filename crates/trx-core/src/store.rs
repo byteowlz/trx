@@ -6,6 +6,7 @@
 //! memory and the next mutation flushes JSONL and removes the legacy
 //! directory. Reads never mutate disk.
 
+use crate::central::{self, CentralRepo};
 use crate::{Error, Issue, Result, legacy_crdt};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -37,6 +38,9 @@ pub struct Store {
     /// True when issues were loaded from legacy CRDT files; the next save will
     /// write canonical JSONL and remove the legacy `crdt/` directory.
     migrate_pending: bool,
+    /// Set when the checkout selected central mode via `.trx/central`: the
+    /// authoritative ledger lives in the per-user central store.
+    central: Option<CentralRepo>,
 }
 
 impl Store {
@@ -55,9 +59,41 @@ impl Store {
             root,
             issues: HashMap::new(),
             migrate_pending: false,
+            central: None,
         };
+        if let Some(marker) = central::read_marker(&store.root)? {
+            let store_root =
+                crate::global_config::GlobalConfig::load()?.store_root(marker.store.as_deref())?;
+            store.open_central(store_root)?;
+        }
         store.load()?;
         Ok(store)
+    }
+
+    /// Open the store at an explicit repo root, forced into central mode
+    /// against an explicit central store root. Used for the CLI `--store-root`
+    /// override and tests; normal opens go through [`Store::open_at`] (marker
+    /// + global config resolution).
+    pub fn open_at_central(root: PathBuf, store_root: PathBuf) -> Result<Self> {
+        if !root.join(TRX_DIR).exists() {
+            return Err(Error::NotInitialized);
+        }
+        let mut store = Self {
+            root,
+            issues: HashMap::new(),
+            migrate_pending: false,
+            central: None,
+        };
+        store.open_central(store_root)?;
+        store.load()?;
+        Ok(store)
+    }
+
+    fn open_central(&mut self, store_root: PathBuf) -> Result<()> {
+        let cs = central::CentralStore::open_at(store_root);
+        let checkout = central::Checkout::at(&self.root)?;
+        self.central = Some(cs.register(&checkout)?);
+        Ok(())
     }
 
     /// Initialize a new store in the current directory.
@@ -85,6 +121,7 @@ prefix = "{}"
             root,
             issues: HashMap::new(),
             migrate_pending: false,
+            central: None,
         })
     }
 
@@ -156,14 +193,32 @@ prefix = "{}"
         Ok(())
     }
 
-    /// Path to the .trx directory.
+    /// Path to the .trx directory (always inside the checkout).
     pub fn trx_dir(&self) -> PathBuf {
         self.root.join(TRX_DIR)
     }
 
-    /// Path to issues.jsonl.
+    /// Directory holding the authoritative ledger: the central repo dir in
+    /// central mode, `.trx/` otherwise.
+    pub fn ledger_dir(&self) -> PathBuf {
+        self.central
+            .as_ref()
+            .map_or_else(|| self.trx_dir(), |repo| repo.dir.clone())
+    }
+
+    /// True when this checkout reads/writes the central store.
+    pub fn is_central(&self) -> bool {
+        self.central.is_some()
+    }
+
+    /// Details of the central repo backing this store, if in central mode.
+    pub fn central_repo(&self) -> Option<&CentralRepo> {
+        self.central.as_ref()
+    }
+
+    /// Path to issues.jsonl (in the authoritative ledger directory).
     pub fn issues_path(&self) -> PathBuf {
-        self.trx_dir().join(ISSUES_FILE)
+        self.ledger_dir().join(ISSUES_FILE)
     }
 
     /// True if the store was loaded from a legacy CRDT layout and the next
@@ -298,7 +353,7 @@ prefix = "{}"
     }
 
     fn acquire_lock(&self) -> Result<StoreLock> {
-        StoreLock::acquire(self.trx_dir().join(LOCK_FILE))
+        StoreLock::acquire(self.ledger_dir().join(LOCK_FILE))
     }
 
     pub fn get(&self, id: &str) -> Option<&Issue> {
@@ -375,21 +430,36 @@ prefix = "{}"
     }
 
     pub fn prefix(&self) -> Result<String> {
+        // Central mode: the central config is authoritative; fall back to the
+        // checkout config for repos that migrated without a central one yet.
+        if let Some(repo) = &self.central {
+            let central_path = repo.config_path();
+            if central_path.is_file() {
+                let content = fs::read_to_string(&central_path)?;
+                if let Some(value) = parse_prefix(&content) {
+                    return Ok(value);
+                }
+            }
+        }
         let config_path = self.trx_dir().join(CONFIG_FILE);
         if !config_path.exists() {
             return Ok("trx".to_string());
         }
         let content = fs::read_to_string(&config_path)?;
-        for line in content.lines() {
-            if let Some(value) = line.strip_prefix("prefix")
-                && let Some(value) = value.trim().strip_prefix('=')
-            {
-                let value = value.trim().trim_matches('"');
-                return Ok(value.to_string());
-            }
-        }
-        Ok("trx".to_string())
+        Ok(parse_prefix(&content).unwrap_or_else(|| "trx".to_string()))
     }
+}
+
+fn parse_prefix(content: &str) -> Option<String> {
+    for line in content.lines() {
+        if let Some(value) = line.strip_prefix("prefix")
+            && let Some(value) = value.trim().strip_prefix('=')
+        {
+            let value = value.trim().trim_matches('"');
+            return Some(value.to_string());
+        }
+    }
+    None
 }
 
 struct StoreLock {
@@ -668,5 +738,154 @@ mod tests {
         std::env::set_current_dir(old_cwd).unwrap();
 
         assert_eq!(root, repo);
+    }
+
+    // --- central mode integration -----------------------------------------
+
+    fn git(dir: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .output()
+            .expect("git should be available");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn init_git_repo(dir: &Path) {
+        fs::create_dir_all(dir).unwrap();
+        git(dir, &["init", "-q", "-b", "main"]);
+        fs::write(dir.join("file.txt"), "hello\n").unwrap();
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-q", "-m", "initial"]);
+    }
+
+    #[test]
+    fn test_central_mode_routes_ledger_to_store_and_back() {
+        let repo = tempfile::tempdir().unwrap();
+        let store_root = tempfile::tempdir().unwrap();
+        init_git_repo(repo.path());
+        fs::create_dir_all(repo.path().join(TRX_DIR)).unwrap();
+        fs::write(
+            repo.path().join(TRX_DIR).join(CONFIG_FILE),
+            "prefix = \"app\"\n",
+        )
+        .unwrap();
+        central::write_marker(repo.path(), None).unwrap();
+
+        let mut store =
+            Store::open_at_central(repo.path().to_path_buf(), store_root.path().to_path_buf())
+                .unwrap();
+        assert!(store.is_central());
+        assert!(store.issues_path().starts_with(store_root.path()));
+
+        store
+            .create(Issue::new("app-1".into(), "central issue".into()))
+            .unwrap();
+
+        // Nothing was written into the checkout.
+        assert!(!repo.path().join(TRX_DIR).join(ISSUES_FILE).exists());
+
+        // A worktree of the same repo sees the same ledger.
+        let wt_parent = tempfile::tempdir().unwrap();
+        let wt = wt_parent.path().join("wt");
+        git(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                "-q",
+                wt.to_str().unwrap(),
+                "-b",
+                "feature",
+            ],
+        );
+        fs::create_dir_all(wt.join(TRX_DIR)).unwrap();
+        central::write_marker(&wt, None).unwrap();
+
+        let wt_store = Store::open_at_central(wt, store_root.path().to_path_buf()).unwrap();
+        assert_eq!(wt_store.get("app-1").unwrap().title, "central issue");
+        assert_eq!(
+            store.central_repo().unwrap().dir,
+            wt_store.central_repo().unwrap().dir
+        );
+    }
+
+    #[test]
+    fn test_central_mode_prefix_comes_from_central_config_with_fallback() {
+        let repo = tempfile::tempdir().unwrap();
+        let store_root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(repo.path().join(TRX_DIR)).unwrap();
+        fs::write(
+            repo.path().join(TRX_DIR).join(CONFIG_FILE),
+            "prefix = \"old\"\n",
+        )
+        .unwrap();
+        central::write_marker(repo.path(), None).unwrap();
+
+        let store =
+            Store::open_at_central(repo.path().to_path_buf(), store_root.path().to_path_buf())
+                .unwrap();
+        // No central config yet: fall back to the checkout config.
+        assert_eq!(store.prefix().unwrap(), "old");
+
+        let central_cfg = store.central_repo().unwrap().config_path();
+        fs::write(&central_cfg, "prefix = \"new\"\n").unwrap();
+        let reloaded =
+            Store::open_at_central(repo.path().to_path_buf(), store_root.path().to_path_buf())
+                .unwrap();
+        assert_eq!(reloaded.prefix().unwrap(), "new");
+    }
+
+    #[test]
+    fn test_repo_local_config_cannot_redirect_central_store() {
+        // A cloned repository must not be able to point the central store at
+        // an attacker-chosen location; the store root comes from the global
+        // layer only (here: the explicit override), never from .trx/config.toml.
+        let repo = tempfile::tempdir().unwrap();
+        let store_root = tempfile::tempdir().unwrap();
+        let evil = tempfile::tempdir().unwrap();
+        fs::create_dir_all(repo.path().join(TRX_DIR)).unwrap();
+        fs::write(
+            repo.path().join(TRX_DIR).join(CONFIG_FILE),
+            format!("store_root = \"{}\"\n", evil.path().display()),
+        )
+        .unwrap();
+        central::write_marker(repo.path(), None).unwrap();
+
+        let store =
+            Store::open_at_central(repo.path().to_path_buf(), store_root.path().to_path_buf())
+                .unwrap();
+        assert!(store.issues_path().starts_with(store_root.path()));
+        assert!(fs::read_dir(evil.path()).unwrap().count() == 0);
+    }
+
+    #[test]
+    fn test_without_marker_ledger_stays_repo_local() {
+        let repo = tempfile::tempdir().unwrap();
+        // Lay out a repo-local store directly (no chdir: tests run in
+        // parallel and current_dir is process-global).
+        fs::create_dir_all(repo.path().join(TRX_DIR)).unwrap();
+        fs::write(
+            repo.path().join(TRX_DIR).join(CONFIG_FILE),
+            "prefix = \"trx\"\n",
+        )
+        .unwrap();
+        fs::write(repo.path().join(TRX_DIR).join(ISSUES_FILE), "").unwrap();
+
+        let mut store = Store::open_at(repo.path().to_path_buf()).unwrap();
+        store
+            .create(Issue::new("trx-x".into(), "local".into()))
+            .unwrap();
+        assert!(!store.is_central());
+        assert!(repo.path().join(TRX_DIR).join(ISSUES_FILE).is_file());
     }
 }
