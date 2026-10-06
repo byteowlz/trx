@@ -50,6 +50,11 @@ impl Store {
         Self::open_at(root)
     }
 
+    /// The store root for the current directory (no CWD mutation).
+    pub fn current_root() -> Result<PathBuf> {
+        Self::find_root()
+    }
+
     /// Open the store at an explicit repo root (no CWD probing).
     pub fn open_at(root: PathBuf) -> Result<Self> {
         if !root.join(TRX_DIR).exists() {
@@ -62,8 +67,16 @@ impl Store {
             central: None,
         };
         if let Some(marker) = central::read_marker(&store.root)? {
-            let store_root =
-                crate::global_config::GlobalConfig::load()?.store_root(marker.store.as_deref())?;
+            // Precedence: TRX_STORE_ROOT env (set from the --store-root flag)
+            // > the root recorded at `central init --store-root` > named
+            // store (--store / TRX_STORE / marker) > global config > default.
+            let store_root = if let Ok(root) = std::env::var("TRX_STORE_ROOT") {
+                crate::paths::expand_tilde(&root)?
+            } else if let Some(root) = &marker.store_root {
+                crate::paths::expand_tilde(root)?
+            } else {
+                crate::global_config::GlobalConfig::load()?.store_root(marker.store.as_deref())?
+            };
             store.open_central(store_root)?;
         }
         store.load()?;
@@ -90,9 +103,16 @@ impl Store {
     }
 
     fn open_central(&mut self, store_root: PathBuf) -> Result<()> {
-        let cs = central::CentralStore::open_at(store_root);
+        let cs = central::CentralStore::open_at(store_root.clone());
         let checkout = central::Checkout::at(&self.root)?;
         self.central = Some(cs.register(&checkout)?);
+        // Automatic sync (opt-in per store): pull at first access, remember
+        // the store for the end-of-process final sync. Best-effort — never
+        // fail the command because a git operation failed.
+        if let Ok(config) = crate::global_config::GlobalConfig::load() {
+            crate::sync::note_active_store(store_root.clone(), config.sync.clone());
+            crate::sync::auto_pull_on_open(&store_root, &config.sync);
+        }
         Ok(())
     }
 
@@ -779,7 +799,7 @@ mod tests {
             "prefix = \"app\"\n",
         )
         .unwrap();
-        central::write_marker(repo.path(), None).unwrap();
+        central::write_marker(repo.path(), None, None).unwrap();
 
         let mut store =
             Store::open_at_central(repo.path().to_path_buf(), store_root.path().to_path_buf())
@@ -809,7 +829,7 @@ mod tests {
             ],
         );
         fs::create_dir_all(wt.join(TRX_DIR)).unwrap();
-        central::write_marker(&wt, None).unwrap();
+        central::write_marker(&wt, None, None).unwrap();
 
         let wt_store = Store::open_at_central(wt, store_root.path().to_path_buf()).unwrap();
         assert_eq!(wt_store.get("app-1").unwrap().title, "central issue");
@@ -829,7 +849,7 @@ mod tests {
             "prefix = \"old\"\n",
         )
         .unwrap();
-        central::write_marker(repo.path(), None).unwrap();
+        central::write_marker(repo.path(), None, None).unwrap();
 
         let store =
             Store::open_at_central(repo.path().to_path_buf(), store_root.path().to_path_buf())
@@ -859,7 +879,7 @@ mod tests {
             format!("store_root = \"{}\"\n", evil.path().display()),
         )
         .unwrap();
-        central::write_marker(repo.path(), None).unwrap();
+        central::write_marker(repo.path(), None, None).unwrap();
 
         let store =
             Store::open_at_central(repo.path().to_path_buf(), store_root.path().to_path_buf())

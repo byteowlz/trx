@@ -17,6 +17,7 @@ pub(crate) mod legacy_crdt;
 pub mod paths;
 pub mod service;
 pub mod store;
+pub mod sync;
 pub mod verification;
 
 pub use agent_ctx::AgentCtx;
@@ -33,6 +34,7 @@ pub use id::generate_id;
 pub use issue::{Dependency, DependencyType, Issue, IssueType, Status};
 pub use service::{ServiceManager, ServiceStatus};
 pub use store::{Store, TRX_GITATTRIBUTES_LINES};
+pub use sync::{SyncOutcome, SyncState, SyncStatus};
 pub use verification::{
     CloseGateReport, VerificationCheck, VerificationConfig, VerificationRun, VerificationStatus,
     VerificationStore, evaluate_close_gate, latest_run,

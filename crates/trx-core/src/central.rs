@@ -121,6 +121,14 @@ impl CentralRepo {
     pub fn lock_path(&self) -> PathBuf {
         self.dir.join("issues.lock")
     }
+
+    /// The store root this repo directory lives under.
+    pub fn store_root(&self) -> Option<PathBuf> {
+        self.dir
+            .parent()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+    }
 }
 
 /// Contents of a `.trx/central` marker.
@@ -128,6 +136,9 @@ impl CentralRepo {
 pub struct CentralMarker {
     /// Named store to use; `None` selects the default store.
     pub store: Option<String>,
+    /// Explicit store root recorded at `central init --store-root` time
+    /// (machine-specific; named stores are the portable alternative).
+    pub store_root: Option<String>,
 }
 
 /// Path of the central-mode marker for a checkout root.
@@ -144,12 +155,17 @@ pub fn read_marker(root: &Path) -> Result<Option<CentralMarker>> {
     let content = fs::read_to_string(&path)?;
     let mut marker = CentralMarker::default();
     for line in content.lines() {
-        if let Some(value) = line.strip_prefix("store")
-            && let Some(value) = value.trim().strip_prefix('=')
-        {
-            let value = value.trim().trim_matches('"');
-            if !value.is_empty() {
-                marker.store = Some(value.to_string());
+        for (key, target) in [
+            ("store", &mut marker.store),
+            ("store_root", &mut marker.store_root),
+        ] {
+            if let Some(value) = line.strip_prefix(key)
+                && let Some(value) = value.trim().strip_prefix('=')
+            {
+                let value = value.trim().trim_matches('"');
+                if !value.is_empty() {
+                    *target = Some(value.to_string());
+                }
             }
         }
     }
@@ -157,7 +173,7 @@ pub fn read_marker(root: &Path) -> Result<Option<CentralMarker>> {
 }
 
 /// Write the `.trx/central` marker selecting central mode for a checkout.
-pub fn write_marker(root: &Path, store: Option<&str>) -> Result<()> {
+pub fn write_marker(root: &Path, store: Option<&str>, store_root: Option<&Path>) -> Result<()> {
     let path = marker_path(root);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -168,6 +184,9 @@ pub fn write_marker(root: &Path, store: Option<&str>) -> Result<()> {
     );
     if let Some(store) = store {
         content.push_str(&format!("store = \"{store}\"\n"));
+    }
+    if let Some(store_root) = store_root {
+        content.push_str(&format!("store_root = \"{}\"\n", store_root.display()));
     }
     fs::write(path, content)?;
     Ok(())
@@ -606,16 +625,20 @@ mod tests {
     fn test_marker_round_trip_with_and_without_store() {
         let temp = tempfile::tempdir().unwrap();
         assert!(read_marker(temp.path()).unwrap().is_none());
-        write_marker(temp.path(), None).unwrap();
-        assert_eq!(
-            read_marker(temp.path()).unwrap(),
-            Some(CentralMarker { store: None })
-        );
-        write_marker(temp.path(), Some("work")).unwrap();
+        write_marker(temp.path(), None, None).unwrap();
         assert_eq!(
             read_marker(temp.path()).unwrap(),
             Some(CentralMarker {
-                store: Some("work".into())
+                store: None,
+                store_root: None
+            })
+        );
+        write_marker(temp.path(), Some("work"), Some(Path::new("/data/trx-work"))).unwrap();
+        assert_eq!(
+            read_marker(temp.path()).unwrap(),
+            Some(CentralMarker {
+                store: Some("work".into()),
+                store_root: Some("/data/trx-work".into()),
             })
         );
     }

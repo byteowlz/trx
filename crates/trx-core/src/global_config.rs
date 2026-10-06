@@ -105,6 +105,22 @@ impl GlobalConfig {
 
     /// Resolve the store root for `store` (None = default store).
     ///
+    /// `store_root_override` (the `--store-root` flag) wins over everything.
+    /// `TRX_STORE_ROOT` overrides the default store; `TRX_STORE` selects a
+    /// named store. `~` expands to the home directory.
+    pub fn resolve_store_root(
+        &self,
+        store: Option<&str>,
+        store_root_override: Option<&str>,
+    ) -> crate::Result<PathBuf> {
+        if let Some(root) = store_root_override {
+            return expand_home(root);
+        }
+        self.store_root(store)
+    }
+
+    /// Resolve the store root for `store` (None = default store).
+    ///
     /// `TRX_STORE_ROOT` overrides the default store; `TRX_STORE` selects a
     /// named store. `~` expands to the home directory.
     pub fn store_root(&self, store: Option<&str>) -> crate::Result<PathBuf> {
@@ -132,13 +148,7 @@ impl GlobalConfig {
 
 /// Expand a leading `~/` to the home directory.
 fn expand_home(path: &str) -> crate::Result<PathBuf> {
-    if let Some(rest) = path.strip_prefix("~/") {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or_else(|| crate::Error::Other("cannot expand '~': HOME not set".to_string()))?;
-        return Ok(home.join(rest));
-    }
-    Ok(PathBuf::from(path))
+    crate::paths::expand_tilde(path)
 }
 
 #[cfg(test)]

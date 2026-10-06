@@ -46,6 +46,17 @@ pub fn data_base() -> crate::Result<PathBuf> {
     base_dir("XDG_DATA_HOME", ".local/share")
 }
 
+/// Expand a leading `~/` to the home directory.
+pub fn expand_tilde(path: &str) -> crate::Result<PathBuf> {
+    if let Some(rest) = path.strip_prefix("~/") {
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .ok_or_else(|| crate::Error::Other("cannot expand '~': HOME not set".to_string()))?;
+        return Ok(home.join(rest));
+    }
+    Ok(PathBuf::from(path))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,5 +95,18 @@ mod tests {
     fn test_no_home_no_base_on_unix() {
         let got = resolve_base(None, None, false, ".local/share");
         assert_eq!(got, None);
+    }
+
+    #[test]
+    fn test_expand_tilde() {
+        // Non-tilde paths pass through untouched.
+        assert_eq!(
+            expand_tilde("/abs/path").unwrap(),
+            PathBuf::from("/abs/path")
+        );
+        assert_eq!(
+            expand_tilde("~not-home").unwrap(),
+            PathBuf::from("~not-home")
+        );
     }
 }

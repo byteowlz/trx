@@ -2697,50 +2697,6 @@ pub fn import(path: &str, prefix: Option<String>, json: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn purge_beads(force: bool) -> Result<()> {
-    let beads_dir = std::path::Path::new(".beads");
-
-    if !beads_dir.exists() {
-        println!("No .beads directory found");
-        return Ok(());
-    }
-
-    if !force {
-        println!(
-            "{}",
-            "This will remove .beads/ directory and all beads data.".red()
-        );
-        println!("Make sure you have imported issues first: trx import .beads/issues.jsonl");
-        println!();
-        print!("Continue? [y/N] ");
-        std::io::Write::flush(&mut std::io::stdout())?;
-
-        let mut input = String::new();
-        std::io::stdin().read_line(&mut input)?;
-
-        if !input.trim().eq_ignore_ascii_case("y") {
-            println!("Aborted");
-            return Ok(());
-        }
-    }
-
-    // Remove .beads directory
-    std::fs::remove_dir_all(beads_dir)?;
-
-    // Try to clean up daemon socket if exists
-    let socket = std::path::Path::new(".beads/bd.sock");
-    if socket.exists() {
-        let _ = std::fs::remove_file(socket);
-    }
-
-    println!("{} Removed .beads/", "✓".green());
-    println!("You may also want to:");
-    println!("  - Remove beads from git: git rm -r .beads/");
-    println!("  - Kill any running bd daemon");
-
-    Ok(())
-}
-
 /// Output JSON schema for config file
 pub fn schema() -> Result<()> {
     let schema = serde_json::json!({

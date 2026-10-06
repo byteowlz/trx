@@ -102,8 +102,7 @@ trx verify show ID RUN_ID
 trx sync [-m MESSAGE]          # Install merge attributes; commit trx state
 
 # Migration
-trx import .beads/issues.jsonl [--prefix PREFIX]
-trx purge-beads [--force]
+trx import .beads/issues.jsonl [--prefix PREFIX]   # then remove .beads/ yourself
 ```
 
 ## TUI Viewer
@@ -159,8 +158,8 @@ trx import .beads/issues.jsonl
 # 3. Verify import
 trx list --all
 
-# 4. Remove beads (optional)
-trx purge-beads
+# 4. Remove beads data if you no longer need it (optional)
+rm -rf .beads
 
 # 5. Commit
 git add .trx/ && git commit -m "Add trx issue tracking"

@@ -6,6 +6,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 mod commands;
+mod store_cmds;
 
 #[derive(Parser)]
 #[command(name = "trx")]
@@ -18,6 +19,14 @@ struct Cli {
     /// Output as JSON
     #[arg(long, global = true)]
     json: bool,
+
+    /// Central store name ([stores.<name>] in the global config; env TRX_STORE)
+    #[arg(long, global = true)]
+    store: Option<String>,
+
+    /// Central store root override (env TRX_STORE_ROOT)
+    #[arg(long, global = true, value_name = "PATH")]
+    store_root: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -260,13 +269,6 @@ enum Commands {
         prefix: Option<String>,
     },
 
-    /// Remove beads from repository
-    PurgeBeads {
-        /// Skip confirmation
-        #[arg(long)]
-        force: bool,
-    },
-
     /// Output JSON schema for config file
     Schema,
 
@@ -470,6 +472,52 @@ enum Commands {
         #[arg(short = 'l', long)]
         limit: Option<usize>,
     },
+
+    /// Central store operations for this repository
+    Central {
+        #[command(subcommand)]
+        command: CentralCommands,
+    },
+
+    /// Central store git sync operations
+    Store {
+        #[command(subcommand)]
+        command: StoreCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum CentralCommands {
+    /// Enable central mode for this repository (issues live in the
+    /// per-user central store instead of .trx/)
+    Init,
+    /// Show mode, identity, ledger location and sync summary
+    Status,
+}
+
+#[derive(Subcommand)]
+enum StoreCommands {
+    /// Make the central store a synced git repository (opt-in)
+    Init {
+        /// Remote URL to sync with (git transport, your credentials)
+        #[arg(long)]
+        remote: String,
+    },
+    /// Sync the store: commit → pull → push (offline-safe)
+    Sync {
+        #[command(subcommand)]
+        action: Option<StoreSyncAction>,
+    },
+}
+
+#[derive(Subcommand)]
+enum StoreSyncAction {
+    /// Show remote, pending commits and last pull/push
+    Status,
+    /// Pull only (merge; union rules for ledgers)
+    Pull,
+    /// Push only (retries once after a pull on rejection)
+    Push,
 }
 
 #[derive(Subcommand)]
@@ -651,6 +699,26 @@ enum PlanCommands {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    // Global central-store flags become process env: the core resolution
+    // layer (flags > env > config) picks them up everywhere. Safe: single-
+    // threaded startup, before any thread is spawned.
+    if let Some(name) = &cli.store {
+        // SAFETY: no threads exist yet; single write before any read.
+        unsafe { std::env::set_var("TRX_STORE", name) };
+    }
+    if let Some(root) = &cli.store_root {
+        // SAFETY: no threads exist yet; single write before any read.
+        unsafe { std::env::set_var("TRX_STORE_ROOT", root) };
+    }
+
+    let result = run(cli);
+    // Central mode: commit anything left dirty (e.g. events appended after
+    // the last ledger write) and push. Best-effort, never masks the result.
+    trx_core::sync::final_sync();
+    result
+}
+
+fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Commands::Init { prefix } => commands::init(&prefix),
         Commands::Doctor { fix } => commands::doctor(fix, cli.json),
@@ -791,10 +859,29 @@ fn main() -> Result<()> {
             dry_run,
             no_commit,
         } => commands::sync(message, dry_run, no_commit),
+        Commands::Central { command } => match command {
+            CentralCommands::Init => {
+                store_cmds::central_init(cli.store.as_deref(), cli.store_root.as_deref(), cli.json)
+            }
+            CentralCommands::Status => store_cmds::central_status(cli.json),
+        },
+        Commands::Store { command } => match command {
+            StoreCommands::Init { remote } => store_cmds::store_init(
+                &remote,
+                cli.store.as_deref(),
+                cli.store_root.as_deref(),
+                cli.json,
+            ),
+            StoreCommands::Sync { action } => store_cmds::store_sync(
+                action,
+                cli.store.as_deref(),
+                cli.store_root.as_deref(),
+                cli.json,
+            ),
+        },
         Commands::Handover => commands::handover(cli.json),
         Commands::Search { query, all_repos } => commands::search(&query, all_repos, cli.json),
         Commands::Import { path, prefix } => commands::import(&path, prefix, cli.json),
-        Commands::PurgeBeads { force } => commands::purge_beads(force),
         Commands::Schema => commands::schema(),
         Commands::Config { command } => match command {
             Some(ConfigCommands::Show) => commands::config_show(cli.json),
