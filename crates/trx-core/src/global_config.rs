@@ -69,6 +69,19 @@ fn default_max_depth() -> u32 {
     4
 }
 
+/// Default storage mode for checkouts that have no `.trx` ledger yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum DefaultMode {
+    /// Repo-local `.trx` (create via `trx init`); central strictly opt-in.
+    #[default]
+    RepoLocal,
+    /// Central store automatically: a checkout without `.trx` reads/writes
+    /// the central store without anything written into the checkout
+    /// (mmry-style). `trx init` still forces an explicit repo-local ledger.
+    Central,
+}
+
 /// Global per-user configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -77,6 +90,8 @@ pub struct GlobalConfig {
     pub store_root: Option<String>,
     /// What to do with leftover repo-local ledgers in central-marked repos.
     pub migrate: MigratePolicy,
+    /// Mode for checkouts that have no `.trx` ledger yet.
+    pub default_mode: DefaultMode,
     /// Where discovery looks for repo-local ledgers.
     pub roots: Vec<RootScan>,
     /// Automatic sync settings for central stores.
@@ -215,6 +230,20 @@ mod tests {
         assert_eq!(parsed, config);
         assert_eq!(parsed.sync.timeout_secs, 10);
         assert_eq!(parsed.migrate, MigratePolicy::Prompt);
+    }
+
+    #[test]
+    fn test_default_mode_parsing() {
+        let central: GlobalConfig = toml::from_str("default_mode = \"central\"").unwrap();
+        assert_eq!(central.default_mode, DefaultMode::Central);
+        let local: GlobalConfig = toml::from_str("default_mode = \"repo-local\"").unwrap();
+        assert_eq!(local.default_mode, DefaultMode::RepoLocal);
+        let empty: GlobalConfig = toml::from_str("").unwrap();
+        assert_eq!(
+            empty.default_mode,
+            DefaultMode::RepoLocal,
+            "repo-local stays the default"
+        );
     }
 
     #[test]

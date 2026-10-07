@@ -7,6 +7,7 @@
 //! directory. Reads never mutate disk.
 
 use crate::central::{self, CentralRepo};
+use crate::global_config::DefaultMode;
 use crate::{Error, Issue, Result, legacy_crdt};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -45,9 +46,26 @@ pub struct Store {
 
 impl Store {
     /// Find and open the store for the current directory.
+    ///
+    /// With the global `default_mode = "central"`, a checkout that has no
+    /// `.trx` ledger yet automatically reads/writes the central store
+    /// (nothing is written into the checkout). Existing `.trx` ledgers keep
+    /// repo-local mode unless a `.trx/central` marker opts them in.
     pub fn open() -> Result<Self> {
-        let root = Self::find_root()?;
-        Self::open_at(root)
+        match Self::find_root() {
+            Ok(root) => Self::open_at(root),
+            Err(Error::NotInitialized)
+                if crate::global_config::GlobalConfig::load()
+                    .map(|config| config.default_mode == DefaultMode::Central)
+                    .unwrap_or(false) =>
+            {
+                let root = Self::find_git_root_from(&std::env::current_dir()?)
+                    .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+                let store_root = crate::global_config::GlobalConfig::load()?.store_root(None)?;
+                Self::open_central_auto(root, store_root)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// The store root for the current directory (no CWD mutation).
@@ -80,6 +98,21 @@ impl Store {
             store.open_central(store_root)?;
             store.handle_leftover_local_ledger();
         }
+        store.load()?;
+        Ok(store)
+    }
+
+    /// Open a checkout without any `.trx` in central mode directly
+    /// (`default_mode = "central"`): nothing is written into the checkout;
+    /// identity and ledger live in the central store.
+    pub fn open_central_auto(root: PathBuf, store_root: PathBuf) -> Result<Self> {
+        let mut store = Self {
+            root,
+            issues: HashMap::new(),
+            migrate_pending: false,
+            central: None,
+        };
+        store.open_central(store_root)?;
         store.load()?;
         Ok(store)
     }

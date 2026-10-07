@@ -425,6 +425,92 @@ fn setup_scans_and_migrates_all_found_ledgers() {
 }
 
 #[test]
+fn default_mode_central_serves_trx_less_checkouts_without_writing_to_them() {
+    let env = Env::new();
+    let base = tempfile::tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let store = base.path().join("store");
+    let config_file = base.path().join("trx-config.toml");
+    std::fs::write(
+        &config_file,
+        format!(
+            "default_mode = \"central\"\nstore_root = \"{}\"\n",
+            store.display()
+        ),
+    )
+    .unwrap();
+    init_git_repo(&repo);
+    let nested = repo.join("src/deep");
+    std::fs::create_dir_all(&nested).unwrap();
+
+    // No `.trx` anywhere: commands work centrally and write NOTHING into the
+    // checkout (mmry-style default).
+    repo_cmd(&env, &nested)
+        .env("TRX_CONFIG", &config_file)
+        .args(["create", "born central"])
+        .assert()
+        .success();
+    assert!(!repo.join(".trx").exists(), "checkout must stay untouched");
+    repo_cmd(&env, &nested)
+        .env("TRX_CONFIG", &config_file)
+        .args(["list"])
+        .assert()
+        .success()
+        .stdout(contains("born central"));
+
+    // A worktree of the same repo hits the same central ledger.
+    let wt = base.path().join("wt");
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            wt.to_str().unwrap(),
+            "-b",
+            "feature",
+        ],
+    );
+    repo_cmd(&env, &wt)
+        .env("TRX_CONFIG", &config_file)
+        .args(["list"])
+        .assert()
+        .success()
+        .stdout(contains("born central"));
+
+    // `trx init` forces an explicit repo-local ledger, which then shadows the
+    // central store for this checkout (empty, no marker).
+    repo_cmd(&env, &repo)
+        .env("TRX_CONFIG", &config_file)
+        .args(["init"])
+        .assert()
+        .success();
+    repo_cmd(&env, &repo)
+        .env("TRX_CONFIG", &config_file)
+        .args(["list"])
+        .assert()
+        .success()
+        .stdout(contains("No issues found"));
+    // …while the worktree still serves the central ledger.
+    repo_cmd(&env, &wt)
+        .env("TRX_CONFIG", &config_file)
+        .args(["list"])
+        .assert()
+        .success()
+        .stdout(contains("born central"));
+
+    // Default (repo-local) mode is unchanged: without the knob, a fresh
+    // checkout errors instead of silently going central.
+    let fresh = base.path().join("fresh");
+    init_git_repo(&fresh);
+    repo_cmd(&env, &fresh)
+        .args(["list"])
+        .assert()
+        .failure()
+        .stderr(contains("not initialized"));
+}
+
+#[test]
 fn store_sync_connects_two_machines_and_drains_offline_pending() {
     let env = Env::new();
     let base = tempfile::tempdir().unwrap();

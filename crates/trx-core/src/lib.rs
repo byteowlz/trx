@@ -29,7 +29,7 @@ pub use events::{
     Event, EventAction, EventLog, FieldChange, SessionSummary, diff_issue, enrich_issue,
     summarize_sessions,
 };
-pub use global_config::{GlobalConfig, MigratePolicy, RootScan, StoreDef, SyncConfig};
+pub use global_config::{DefaultMode, GlobalConfig, MigratePolicy, RootScan, StoreDef, SyncConfig};
 pub use graph::IssueGraph;
 pub use id::generate_id;
 pub use issue::{Dependency, DependencyType, Issue, IssueType, Status};
