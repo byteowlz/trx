@@ -1,8 +1,13 @@
-//! AGENT_CTX environment contract reader (v1 of the contract).
+//! AGENT_CTX environment contract reader.
 //!
 //! Reads `AGENT_CTX_*` environment variables defensively. Missing variables
-//! never break behavior; malformed values are ignored. See
-//! `schemas/agent-context-env/agent-context-env.md` for the full contract.
+//! never break behavior; malformed values are ignored. Contract versions are
+//! accepted as-is (v1/v2/v3); unknown fields are ignored. `EXEC_ENV` is an
+//! optional open environment/profile label; absent means unknown. Run-mode
+//! tokens from old records remain readable but are never reinterpreted as a
+//! complete EXEC_ENV.
+//!
+//! See `schemas/agent-context-env.v3.schema.json` for the v3 contract.
 
 use serde::{Deserialize, Serialize};
 
@@ -27,9 +32,14 @@ pub struct AgentCtx {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
 
-    /// Runtime mode (e.g., "runner")
+    /// Runtime mode (legacy v1/v2 token; absent in v3 producers)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_mode: Option<String>,
+
+    /// Producer-supplied execution environment/profile label (open vocabulary;
+    /// absent means unknown).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exec_env: Option<String>,
 
     /// Platform session id (stable for joins)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -105,6 +115,7 @@ impl AgentCtx {
             platform_version: read("AGENT_CTX_PLATFORM_VERSION"),
             harness: read("AGENT_CTX_HARNESS"),
             run_mode: read("AGENT_CTX_RUN_MODE"),
+            exec_env: read_exec_env("AGENT_CTX_EXEC_ENV"),
             platform_session_id: read("AGENT_CTX_PLATFORM_SESSION_ID"),
             harness_session_id: read("AGENT_CTX_HARNESS_SESSION_ID"),
             session_name: read("AGENT_CTX_SESSION_NAME"),
@@ -132,6 +143,7 @@ impl AgentCtx {
             && self.platform_version.is_none()
             && self.harness.is_none()
             && self.run_mode.is_none()
+            && self.exec_env.is_none()
             && self.platform_session_id.is_none()
             && self.harness_session_id.is_none()
             && self.session_name.is_none()
@@ -174,6 +186,25 @@ fn read(name: &str) -> Option<String> {
     }
 }
 
+/// Read `AGENT_CTX_EXEC_ENV`, validating against the v3 bounded-string
+/// contract: open lowercase tokens, max length 256, no control characters.
+/// A missing, blank, oversized, or control-character value is treated as
+/// absent (unknown), never a fabricated or malformed profile. The value is
+/// returned as-was (trimmed for integrity) so consumers see the producer's
+/// label, not a normalized guess.
+fn read_exec_env(name: &str) -> Option<String> {
+    let value = read(name)?;
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || trimmed.chars().count() > 256
+        || trimmed.chars().any(|c| c.is_control())
+    {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,6 +215,7 @@ mod tests {
         "AGENT_CTX_PLATFORM_VERSION",
         "AGENT_CTX_HARNESS",
         "AGENT_CTX_RUN_MODE",
+        "AGENT_CTX_EXEC_ENV",
         "AGENT_CTX_PLATFORM_SESSION_ID",
         "AGENT_CTX_HARNESS_SESSION_ID",
         "AGENT_CTX_SESSION_NAME",
@@ -277,9 +309,76 @@ mod tests {
                 assert_eq!(ctx.machine_id.as_deref(), Some("machine-1"));
                 assert_eq!(ctx.multiplexer.as_deref(), Some("herdr"));
                 assert_eq!(ctx.os_arch.as_deref(), Some("linux/amd64"));
+                assert!(ctx.exec_env.is_none());
                 assert!(!ctx.is_empty());
             },
         );
+    }
+
+    #[test]
+    fn from_env_reads_v3_exec_env() {
+        with_env(
+            &[
+                ("AGENT_CTX_VERSION", "3"),
+                ("AGENT_CTX_EXEC_ENV", "linux-container"),
+            ],
+            || {
+                let ctx = AgentCtx::from_env();
+                assert_eq!(ctx.version.as_deref(), Some("3"));
+                assert_eq!(ctx.exec_env.as_deref(), Some("linux-container"));
+                assert!(ctx.run_mode.is_none());
+            },
+        );
+    }
+
+    #[test]
+    fn exec_env_absent_or_blank_is_unknown() {
+        with_env(&[("AGENT_CTX_EXEC_ENV", "")], || {
+            assert!(AgentCtx::from_env().exec_env.is_none());
+        });
+        with_env(&[("AGENT_CTX_EXEC_ENV", "   ")], || {
+            assert!(AgentCtx::from_env().exec_env.is_none());
+        });
+    }
+
+    #[test]
+    fn exec_env_accepts_open_lowercase_labels() {
+        with_env(&[("AGENT_CTX_EXEC_ENV", "new-runtime-profile")], || {
+            assert_eq!(
+                AgentCtx::from_env().exec_env.as_deref(),
+                Some("new-runtime-profile")
+            );
+        });
+    }
+
+    #[test]
+    fn exec_env_rejects_oversize_and_controls_without_breaking_other_fields() {
+        let long = "x".repeat(257);
+        with_env(
+            &[
+                ("AGENT_CTX_EXEC_ENV", &long),
+                ("AGENT_CTX_VERSION", "3"),
+                ("AGENT_CTX_PLATFORM_NAME", "oqto"),
+            ],
+            || {
+                let ctx = AgentCtx::from_env();
+                // Oversize EXEC_ENV treated as unknown; unrelated fields intact.
+                assert!(ctx.exec_env.is_none());
+                assert_eq!(ctx.version.as_deref(), Some("3"));
+                assert_eq!(ctx.platform.as_deref(), Some("oqto"));
+            },
+        );
+        with_env(&[("AGENT_CTX_EXEC_ENV", "bad\nvalue")], || {
+            assert!(AgentCtx::from_env().exec_env.is_none());
+        });
+    }
+
+    #[test]
+    fn exec_env_accepts_boundary_length_256() {
+        let ok = "y".repeat(256);
+        with_env(&[("AGENT_CTX_EXEC_ENV", &ok)], || {
+            assert_eq!(AgentCtx::from_env().exec_env.as_deref(), Some(ok.as_str()));
+        });
     }
 
     #[test]

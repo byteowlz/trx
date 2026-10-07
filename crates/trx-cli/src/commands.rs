@@ -3339,6 +3339,7 @@ pub fn info(json: bool) -> Result<()> {
             ("platform_version", ctx.platform_version.as_deref()),
             ("harness", ctx.harness.as_deref()),
             ("run_mode", ctx.run_mode.as_deref()),
+            ("exec_env", ctx.exec_env.as_deref()),
             ("user_id", ctx.user_id.as_deref()),
             ("workspace_id", ctx.workspace_id.as_deref()),
             ("workspace_path", ctx.workspace_path.as_deref()),

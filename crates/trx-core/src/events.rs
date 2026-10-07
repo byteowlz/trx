@@ -127,6 +127,8 @@ pub struct Event {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub exec_env: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub readable_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_path: Option<String>,
@@ -166,6 +168,7 @@ impl Event {
             os_arch: ctx.os_arch.clone(),
             version: ctx.version.clone(),
             run_mode: ctx.run_mode.clone(),
+            exec_env: ctx.exec_env.clone(),
             readable_id: ctx.readable_id.clone(),
             workspace_path: ctx.workspace_path.clone(),
             sandbox_profile: ctx.sandbox_profile.clone(),
@@ -460,6 +463,7 @@ mod tests {
             multiplexer: Some("herdr".into()),
             os_arch: Some("linux/amd64".into()),
             harness_session_id: Some("session-1".into()),
+            exec_env: Some("linux-container".into()),
             ..Default::default()
         };
         for action in [
@@ -477,10 +481,37 @@ mod tests {
             assert_eq!(event.harness_session_id.as_deref(), Some("session-1"));
             assert_eq!(event.multiplexer.as_deref(), Some("herdr"));
             assert_eq!(event.os_arch.as_deref(), Some("linux/amd64"));
+            assert_eq!(event.exec_env.as_deref(), Some("linux-container"));
         }
         let old = serde_json::json!({"id":"e", "issue_id":"trx-abc1", "action":"created", "timestamp":"2026-01-01T00:00:00Z"});
         let old: Event = serde_json::from_value(old).unwrap();
         assert!(old.agent_id.is_none() && old.machine_id.is_none());
+        assert!(old.exec_env.is_none());
+    }
+
+    #[test]
+    fn event_exec_env_serde_round_trips_and_old_json_without_it_loads() {
+        let ctx = AgentCtx {
+            exec_env: Some("windows-vm".into()),
+            harness: Some("pi".into()),
+            ..Default::default()
+        };
+        let event = Event::new("trx-x1", EventAction::Created, &ctx);
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["exec_env"], "windows-vm");
+
+        // New record round-trips.
+        let parsed: Event = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(parsed.exec_env.as_deref(), Some("windows-vm"));
+        assert_eq!(parsed.harness.as_deref(), Some("pi"));
+
+        // A legacy record without the exec_env field still deserializes and
+        // treats it as unknown (None), never a fabricated value.
+        let mut legacy = json.clone();
+        legacy.as_object_mut().unwrap().remove("exec_env");
+        let legacy: Event = serde_json::from_value(legacy).unwrap();
+        assert!(legacy.exec_env.is_none());
+        assert_eq!(legacy.harness.as_deref(), Some("pi"));
     }
 
     #[test]
