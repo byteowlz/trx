@@ -328,6 +328,217 @@ fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
 }
 
+/// Migrate the current repo's `.trx` ledger into the central store, or with
+/// `--all`, every repo-local ledger found under the configured scan roots.
+pub fn migrate(all: bool, dry_run: bool, untrack: bool, scan: &[String], json: bool) -> Result<()> {
+    let config = GlobalConfig::load()?;
+    let resolved = resolve_store_root(&config, None, None)?;
+    let opts = trx_core::migrate::MigrateOptions { dry_run, untrack };
+
+    let targets: Vec<std::path::PathBuf> = if all {
+        let mut roots: Vec<std::path::PathBuf> =
+            scan.iter().map(std::path::PathBuf::from).collect();
+        if roots.is_empty() {
+            roots = config
+                .roots
+                .iter()
+                .map(|root| std::path::PathBuf::from(&root.path))
+                .collect();
+        }
+        if roots.is_empty() {
+            bail!(
+                "--all needs scan roots: pass --scan PATH or configure [[roots]] in {}",
+                GlobalConfig::path()?.display()
+            );
+        }
+        trx_core::migrate::scan_for_ledgers(&roots, 8)?
+    } else {
+        vec![Store::current_root()?]
+    };
+    if targets.is_empty() {
+        if json {
+            println!("{}", serde_json::json!({ "migrated": [] }));
+        } else {
+            println!("No repo-local ledgers found.");
+        }
+        return Ok(());
+    }
+
+    let mut reports = Vec::new();
+    let mut failures = Vec::new();
+    for target in &targets {
+        match trx_core::migrate::migrate_repo(target, &resolved, None, opts) {
+            Ok(report) => reports.push(report),
+            Err(error) => failures.push(format!("{}: {error}", target.display())),
+        }
+    }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "dry_run": dry_run,
+                "migrated": reports,
+                "failures": failures,
+            })
+        );
+    } else {
+        for report in &reports {
+            if report.already_central {
+                println!(
+                    "{} {} already central — nothing to do",
+                    "=".dimmed(),
+                    report.repo_root
+                );
+                continue;
+            }
+            if dry_run {
+                println!("{} {} (dry run)", "⊘".yellow(), report.repo_root);
+            } else {
+                println!("{} {}", "✓".green(), report.repo_root);
+            }
+            println!(
+                "    {} issues ({} snapshots, {} deps), {} events, {} verifications → {}",
+                report.issues,
+                report.issue_snapshots,
+                report.dependencies,
+                report.events,
+                report.verifications,
+                report.ledger
+            );
+            for backup in &report.backups {
+                println!("    backup: {backup}");
+            }
+            for file in &report.untracked {
+                println!("    untracked: {file}");
+            }
+        }
+        for failure in &failures {
+            println!("{} {failure}", "✗".red());
+        }
+        if !dry_run && !reports.is_empty() {
+            println!("Central mode is now active in migrated checkouts (`.trx/central`).");
+        }
+    }
+    if !failures.is_empty() {
+        bail!("{} migration(s) failed", failures.len());
+    }
+    Ok(())
+}
+
+/// Discover repo-local ledgers under scan roots and show/migrate them all;
+/// sets `migrate = "auto"` in the global config on a real run (mmry setup parity).
+pub fn setup(dry_run: bool, scans: &[String], depth: u32, yes: bool, json: bool) -> Result<()> {
+    let config = GlobalConfig::load()?;
+    let mut roots: Vec<std::path::PathBuf> = scans.iter().map(std::path::PathBuf::from).collect();
+    if roots.is_empty() {
+        roots = config
+            .roots
+            .iter()
+            .map(|root| std::path::PathBuf::from(&root.path))
+            .collect();
+    }
+    if roots.is_empty() {
+        bail!(
+            "Nothing to scan: pass --scan PATH or configure [[roots]] in {}",
+            GlobalConfig::path()?.display()
+        );
+    }
+    let targets = trx_core::migrate::scan_for_ledgers(&roots, depth)?;
+
+    if dry_run || targets.is_empty() {
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({ "dry_run": dry_run, "found": targets.iter().map(|p| p.display().to_string()).collect::<Vec<_>>() })
+            );
+        } else if targets.is_empty() {
+            println!("No repo-local ledgers found under the configured roots.");
+        } else {
+            println!("Found {} repo-local ledger(s):", targets.len());
+            for target in &targets {
+                println!("  {}", target.display());
+            }
+            if dry_run {
+                println!("dry run — nothing written. Run `trx setup` to migrate them all.");
+            }
+        }
+        return Ok(());
+    }
+
+    if !yes && !is_interactive() {
+        bail!(
+            "Refusing to migrate {} repo-local ledger(s) non-interactively without --yes.",
+            targets.len()
+        );
+    }
+    if !yes {
+        println!("Found {} repo-local ledger(s):", targets.len());
+        for target in &targets {
+            println!("  {}", target.display());
+        }
+        print!("Migrate them all into the central store? [y/N] ");
+        use std::io::Write;
+        std::io::stdout().flush()?;
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !answer.trim().eq_ignore_ascii_case("y") {
+            println!("Aborted");
+            return Ok(());
+        }
+    }
+
+    // Real run: migrate everything, then flip the policy to auto.
+    migrate(true, false, false, scans, json)?;
+    set_migrate_auto()?;
+    if !json {
+        println!(
+            "{} migrate = \"auto\" set in {}",
+            "✓".green(),
+            GlobalConfig::path()?.display()
+        );
+    }
+    Ok(())
+}
+
+fn is_interactive() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal()
+}
+
+/// Set `migrate = "auto"` in the global config, preserving comments:
+/// replace an existing `migrate = ...` line in place, else append.
+fn set_migrate_auto() -> Result<()> {
+    let path = GlobalConfig::path()?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut lines: Vec<String> = if path.is_file() {
+        std::fs::read_to_string(&path)?
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let mut replaced = false;
+    for line in &mut lines {
+        if line.trim_start().starts_with("migrate") {
+            *line = "migrate = \"auto\"".to_string();
+            replaced = true;
+        }
+    }
+    if !replaced {
+        lines.push("migrate = \"auto\"".to_string());
+    }
+    let mut content = lines.join("\n");
+    if !content.ends_with('\n') {
+        content.push('\n');
+    }
+    std::fs::write(&path, content)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

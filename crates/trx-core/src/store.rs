@@ -28,7 +28,7 @@ pub const TRX_GITATTRIBUTES_LINES: [&str; 3] = [
 ];
 const LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(25);
-const LEGACY_CRDT_DIR: &str = "crdt";
+pub(crate) const LEGACY_CRDT_DIR: &str = "crdt";
 const LEGACY_ISSUES_MD: &str = "ISSUES.md";
 
 /// JSONL-based issue store.
@@ -78,6 +78,7 @@ impl Store {
                 crate::global_config::GlobalConfig::load()?.store_root(marker.store.as_deref())?
             };
             store.open_central(store_root)?;
+            store.handle_leftover_local_ledger();
         }
         store.load()?;
         Ok(store)
@@ -114,6 +115,60 @@ impl Store {
             crate::sync::auto_pull_on_open(&store_root, &config.sync);
         }
         Ok(())
+    }
+
+    /// A central-mode checkout with a leftover repo-local ledger (restored
+    /// backup, interrupted run): migrate it per the global `migrate` policy.
+    /// Best-effort; the central ledger stays authoritative either way.
+    fn handle_leftover_local_ledger(&mut self) {
+        let local_issues = self.trx_dir().join(ISSUES_FILE);
+        let leftover = local_issues.is_file()
+            && fs::read_to_string(&local_issues)
+                .map(|content| !content.trim().is_empty())
+                .unwrap_or(false);
+        if !leftover {
+            return;
+        }
+        let policy = crate::global_config::GlobalConfig::load()
+            .map(|config| config.migrate)
+            .unwrap_or_default();
+        match policy {
+            crate::global_config::MigratePolicy::Auto => {
+                let Some(central) = self.central.clone() else {
+                    return;
+                };
+                let Some(store_root) = central.store_root() else {
+                    return;
+                };
+                match crate::migrate::migrate_repo(
+                    &self.root,
+                    &store_root,
+                    None,
+                    crate::migrate::MigrateOptions::default(),
+                ) {
+                    Ok(report) => {
+                        warn(&format!(
+                            "auto-migrated leftover repo-local ledger ({} issues) into {}",
+                            report.issues,
+                            central.dir.display()
+                        ));
+                        // Pick up what the migration merged into the central ledger.
+                        if let Err(error) = self.load() {
+                            warn(&format!("reload after auto-migration failed: {error}"));
+                        }
+                    }
+                    Err(error) => warn(&format!(
+                        "auto-migration of leftover repo-local ledger failed: {error}"
+                    )),
+                }
+            }
+            crate::global_config::MigratePolicy::Prompt
+            | crate::global_config::MigratePolicy::Off => {
+                warn(
+                    "leftover repo-local ledger detected; the central store is authoritative — run `trx migrate` to merge it",
+                );
+            }
+        }
     }
 
     /// Initialize a new store in the current directory.

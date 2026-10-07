@@ -14,6 +14,7 @@ pub mod graph;
 pub mod id;
 pub mod issue;
 pub(crate) mod legacy_crdt;
+pub mod migrate;
 pub mod paths;
 pub mod service;
 pub mod store;
@@ -32,6 +33,7 @@ pub use global_config::{GlobalConfig, MigratePolicy, RootScan, StoreDef, SyncCon
 pub use graph::IssueGraph;
 pub use id::generate_id;
 pub use issue::{Dependency, DependencyType, Issue, IssueType, Status};
+pub use migrate::{MigrateOptions, MigrateReport, migrate_repo, scan_for_ledgers};
 pub use service::{ServiceManager, ServiceStatus};
 pub use store::{Store, TRX_GITATTRIBUTES_LINES};
 pub use sync::{SyncOutcome, SyncState, SyncStatus};

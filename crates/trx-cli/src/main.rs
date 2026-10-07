@@ -488,6 +488,40 @@ enum Commands {
         #[command(subcommand)]
         command: StoreCommands,
     },
+
+    /// Migrate repo-local .trx ledger(s) into the central store
+    Migrate {
+        /// Migrate every ledger found under the configured scan roots
+        #[arg(long)]
+        all: bool,
+        /// Show the plan without writing anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Remove migrated ledgers from the git index (git rm --cached,
+        /// left uncommitted)
+        #[arg(long)]
+        untrack: bool,
+        /// Additional scan root for --all (repeatable)
+        #[arg(long, value_name = "PATH")]
+        scan: Vec<String>,
+    },
+
+    /// Find repo-local ledgers and migrate them all (mmry setup parity)
+    Setup {
+        /// Show what would be migrated without writing anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Where to look for repo-local ledgers (repeatable; falls back to
+        /// [[roots]] in the global config)
+        #[arg(long, value_name = "PATH")]
+        scan: Vec<String>,
+        /// Maximum depth to descend when scanning
+        #[arg(long, value_name = "N", default_value_t = 6)]
+        depth: u32,
+        /// Migrate without confirmation (for agents/scripts)
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -885,6 +919,18 @@ fn run(cli: Cli) -> Result<()> {
                 cli.json,
             ),
         },
+        Commands::Migrate {
+            all,
+            dry_run,
+            untrack,
+            scan,
+        } => store_cmds::migrate(all, dry_run, untrack, &scan, cli.json),
+        Commands::Setup {
+            dry_run,
+            scan,
+            depth,
+            yes,
+        } => store_cmds::setup(dry_run, &scan, depth, yes, cli.json),
         Commands::Handover => commands::handover(cli.json),
         Commands::Search { query, all_repos } => commands::search(&query, all_repos, cli.json),
         Commands::Import { path, prefix } => commands::import(&path, prefix, cli.json),

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Added
+
+- Migration into the central store (slice trx-a1s8.5): `trx migrate [--dry-run] [--all] [--untrack] [--scan PATH]` moves a repo-local `.trx` ledger into the central store — merge by id over the append-only files (issue snapshots keep full history, events/verifications dedupe by id), conflicts (same id, divergent content, no newer side) abort with nothing moved, the central ledger is verified complete before the local files are renamed to `*.migrated-<timestamp>` backups, a `.trx/MIGRATED` note is written, and the checkout opts into central mode. `--untrack` removes migrated ledgers from the git index (left uncommitted); re-running after migration is a no-op.
+- `trx setup [--dry-run] [--scan PATH]... [--depth N] [--yes] [--json]` discovers repo-local ledgers under scan roots (skipping dependency/build/cache dirs), shows the plan, migrates them all, and sets `migrate = "auto"` in the global config (comments preserved). Non-interactive runs require `--yes`.
+- Leftover-ledger policy on central-mode opens (mmry parity): `migrate = "auto"` merges a leftover repo-local ledger automatically on first use; `prompt` (default) and `off` warn via `trx: warning:` while the central store stays authoritative.
+
 ### Changed
 
 - Central-store CLI aligned with mmry's flag surface (byteowlz cli-flag-parity): `trx store sync init --remote URL` replaces `trx store init --remote` (mirrors `mmry sync init --remote` while keeping repo-local `trx sync` untouched); new global `--config PATH` / `TRX_CONFIG` selects the global config file, which must exist when given (parity with `--config`/`MMRY_CONFIG`); `trx central init --dry-run` prints the plan (store, identity, planned ledger, shadowed-issue count) without writing anything.

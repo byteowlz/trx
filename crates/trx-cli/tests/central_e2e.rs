@@ -2,11 +2,14 @@
 //! .3/.4): `trx central init`, `trx store sync init --remote`, `trx store sync [status|pull|push]`,
 //! and automatic pull at open / commit+push at exit.
 
+use std::fs;
 use std::path::Path;
 use std::process::Command as StdCommand;
 
 use assert_cmd::Command;
 use predicates::str::contains;
+use trx_core::CentralStore;
+use trx_core::central;
 
 fn git(dir: &Path, args: &[&str]) {
     let output = StdCommand::new("git")
@@ -225,6 +228,200 @@ fn central_init_refuses_to_shadow_existing_repo_local_issues() {
         .assert()
         .success()
         .stdout(contains("precious"));
+}
+
+#[test]
+fn migrate_moves_repo_local_ledger_to_the_central_store() {
+    let env = Env::new();
+    let base = tempfile::tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let store = base.path().join("store");
+    init_git_repo(&repo);
+
+    repo_cmd(&env, &repo)
+        .args(["init", "--prefix", "app"])
+        .assert()
+        .success();
+    repo_cmd(&env, &repo)
+        .args(["create", "migrated one"])
+        .assert()
+        .success();
+    repo_cmd(&env, &repo)
+        .args(["create", "migrated two"])
+        .assert()
+        .success();
+    git(&repo, &["add", ".trx"]);
+    git(&repo, &["commit", "-q", "-m", "tracker"]);
+
+    // Dry run: plan only, nothing moves.
+    repo_cmd(&env, &repo)
+        .args(["migrate", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(contains("(dry run)"));
+    assert!(repo.join(".trx/issues.jsonl").exists());
+    assert!(central::read_marker(&repo).unwrap().is_none());
+
+    // Real migration with untrack: ledger moves, checkout switches to central.
+    repo_cmd(&env, &repo)
+        .env("TRX_STORE_ROOT", &store)
+        .args(["migrate", "--untrack"])
+        .assert()
+        .success()
+        .stdout(contains("2 issues"))
+        .stdout(contains("backup:"));
+    assert!(repo.join(".trx/central").exists());
+    assert!(repo.join(".trx/MIGRATED").exists());
+    assert!(!repo.join(".trx/issues.jsonl").exists());
+    let status = StdCommand::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["status", "--porcelain"])
+        .output()
+        .unwrap();
+    let status = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        status.contains("D  .trx/issues.jsonl"),
+        "staged deletion: {status}"
+    );
+
+    // The checkout now serves issues from the central store.
+    repo_cmd(&env, &repo)
+        .args(["list"])
+        .assert()
+        .success()
+        .stdout(contains("migrated one"))
+        .stdout(contains("migrated two"));
+
+    // A worktree of the same repository inherits the committed .trx ledger
+    // (which carries no marker — markers are machine-local). Store selection
+    // is explicit until the checkout has its own marker: same env/flag rules.
+    let wt = base.path().join("wt");
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            wt.to_str().unwrap(),
+            "-b",
+            "feature",
+        ],
+    );
+    assert!(
+        wt.join(".trx/issues.jsonl").exists(),
+        "worktree starts from the committed tracker"
+    );
+    repo_cmd(&env, &wt)
+        .env("TRX_STORE_ROOT", &store)
+        .args(["migrate"])
+        .assert()
+        .success()
+        .stdout(contains("2 issues"));
+    // Nothing new to merge — all snapshot lines already exist centrally.
+    assert_eq!(
+        fs::read_to_string(
+            trx_core::CentralStore::open_at(store.clone())
+                .find(&central::Checkout::at(&wt).unwrap())
+                .unwrap()
+                .unwrap()
+                .issues_path()
+        )
+        .unwrap()
+        .lines()
+        .count(),
+        2,
+        "idempotent re-merge must not duplicate snapshot lines"
+    );
+    repo_cmd(&env, &wt)
+        .args(["list"])
+        .assert()
+        .success()
+        .stdout(contains("migrated one"));
+}
+
+#[test]
+fn setup_scans_and_migrates_all_found_ledgers() {
+    let env = Env::new();
+    let base = tempfile::tempdir().unwrap();
+    let root = base.path().join("workspaces");
+    let config_file = base.path().join("trx-config.toml");
+    std::fs::write(&config_file, "# test override config\n").unwrap();
+    let store = base.path().join("store");
+
+    for name in ["alpha", "beta"] {
+        let repo = root.join(name);
+        init_git_repo(&repo);
+        repo_cmd(&env, &repo).args(["init"]).assert().success();
+        repo_cmd(&env, &repo)
+            .args(["create", &format!("issue in {name}")])
+            .assert()
+            .success();
+    }
+    // Junk that scanning must skip.
+    let junk = root.join("node_modules/pkg");
+    init_git_repo(&junk);
+    repo_cmd(&env, &junk).args(["init"]).assert().success();
+    repo_cmd(&env, &junk)
+        .args(["create", "must be skipped"])
+        .assert()
+        .success();
+
+    // Dry run lists exactly the two real repos.
+    repo_cmd(&env, &root)
+        .env("TRX_CONFIG", &config_file)
+        .env("TRX_STORE_ROOT", &store)
+        .args(["setup", "--dry-run", "--scan"])
+        .arg(&root)
+        .assert()
+        .success()
+        .stdout(contains("Found 2 repo-local ledger(s)"));
+    assert_eq!(
+        std::fs::read_to_string(&config_file).unwrap(),
+        "# test override config\n",
+        "dry run must not write config"
+    );
+
+    // Real run with --yes (non-interactive): migrates both, sets migrate=auto.
+    repo_cmd(&env, &root)
+        .env("TRX_CONFIG", &config_file)
+        .env("TRX_STORE_ROOT", &store)
+        .args(["setup", "--scan"])
+        .arg(&root)
+        .arg("--yes")
+        .assert()
+        .success()
+        .stdout(contains("migrate = \"auto\""));
+    let config_text = std::fs::read_to_string(&config_file).unwrap();
+    assert!(config_text.contains("migrate = \"auto\""));
+
+    for name in ["alpha", "beta"] {
+        repo_cmd(&env, &root.join(name))
+            .env("TRX_CONFIG", &config_file)
+            .env("TRX_STORE_ROOT", &store)
+            .args(["list"])
+            .assert()
+            .success()
+            .stdout(contains(format!("issue in {name}")));
+    }
+    // The junk ledger was neither migrated nor listed.
+    repo_cmd(&env, &junk)
+        .env("TRX_CONFIG", &config_file)
+        .env("TRX_STORE_ROOT", &store)
+        .args(["list"])
+        .assert()
+        .success()
+        .stdout(contains("must be skipped"));
+
+    // Everything migrated: a second dry run finds nothing.
+    repo_cmd(&env, &root)
+        .env("TRX_CONFIG", &config_file)
+        .env("TRX_STORE_ROOT", &store)
+        .args(["setup", "--dry-run", "--scan"])
+        .arg(&root)
+        .assert()
+        .success()
+        .stdout(contains("No repo-local ledgers found"));
 }
 
 #[test]
