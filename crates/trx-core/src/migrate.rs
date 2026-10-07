@@ -10,7 +10,7 @@
 
 use crate::central::{self, CentralStore, Checkout};
 use crate::store::{LEGACY_CRDT_DIR, LOCK_FILE, StoreLock};
-use crate::{Error, Issue, Result};
+use crate::{Error, Issue, Result, legacy_crdt};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -70,9 +70,9 @@ struct LocalLedger {
 impl LocalLedger {
     fn read(trx_dir: &Path) -> Result<Self> {
         Ok(Self {
-            issue_lines: read_lines(&trx_dir.join(ISSUES_FILE))?,
-            events_lines: read_lines(&trx_dir.join(EVENTS_FILE))?,
-            verifications_lines: read_lines(&trx_dir.join(VERIFICATIONS_FILE))?,
+            issue_lines: read_normalized(&trx_dir.join(ISSUES_FILE))?,
+            events_lines: read_normalized(&trx_dir.join(EVENTS_FILE))?,
+            verifications_lines: read_normalized(&trx_dir.join(VERIFICATIONS_FILE))?,
         })
     }
 
@@ -92,6 +92,50 @@ fn read_lines(path: &Path) -> Result<Vec<String>> {
         .filter(|line| !line.trim().is_empty())
         .map(str::to_owned)
         .collect())
+}
+
+/// Read JSONL, splitting crash artifacts where two valid JSON objects ended
+/// up concatenated on one line (interrupted concurrent appends). Every
+/// object survives; genuinely unparsable lines still abort the migration.
+fn read_normalized(path: &Path) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    for line in read_lines(path)? {
+        if serde_json::from_str::<serde_json::Value>(&line).is_ok() {
+            out.push(line);
+            continue;
+        }
+        match split_concatenated(&line) {
+            Some(parts) => out.extend(parts),
+            None => {
+                return Err(Error::Other(format!(
+                    "unparsable JSONL line in {}: {}",
+                    path.display(),
+                    line
+                )));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Split one line into consecutive valid JSON documents; `None` when any
+/// part fails to parse or nothing splits.
+fn split_concatenated(line: &str) -> Option<Vec<String>> {
+    let trimmed = line.trim();
+    let mut parts = Vec::new();
+    let mut idx = 0usize;
+    while idx < trimmed.len() {
+        let mut stream =
+            serde_json::Deserializer::from_str(&trimmed[idx..]).into_iter::<serde_json::Value>();
+        let value = stream.next()?.ok()?;
+        let end = stream.byte_offset();
+        parts.push(serde_json::to_string(&value).ok()?);
+        idx += end;
+        while idx < trimmed.len() && trimmed.as_bytes()[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+    }
+    (parts.len() > 1).then_some(parts)
 }
 
 fn append_lines(path: &Path, lines: &[String]) -> Result<()> {
@@ -166,10 +210,22 @@ pub fn migrate_repo(
     if !trx_dir.is_dir() {
         return Err(Error::NotInitialized);
     }
-    if trx_dir.join(LEGACY_CRDT_DIR).exists() {
-        return Err(Error::Other(
-            "legacy .trx/crdt layout: run the automerge→JSONL migration first (trx re-open + any mutation migrates it)".to_string(),
-        ));
+    // Legacy v2 automerge layout: convert to JSONL exactly like Store's own
+    // transparent migration (load crdt → append snapshots → drop crdt dir),
+    // then migrate normally. Dry runs only count, never write.
+    let crdt_dir = trx_dir.join(LEGACY_CRDT_DIR);
+    let mut crdt_issue_count = 0usize;
+    if crdt_dir.exists() {
+        let issues = legacy_crdt::load_issues(&crdt_dir)?;
+        crdt_issue_count = issues.len();
+        if !opts.dry_run {
+            let lines: Vec<String> = issues
+                .iter()
+                .map(|issue| serde_json::to_string(issue).map_err(Error::Json))
+                .collect::<Result<Vec<_>>>()?;
+            append_lines(&trx_dir.join(ISSUES_FILE), &lines)?;
+            fs::remove_dir_all(&crdt_dir)?;
+        }
     }
 
     let marker = central::read_marker(repo_root)?;
@@ -258,7 +314,7 @@ pub fn migrate_repo(
         identity: checkout.identity.clone(),
         ledger: central_repo.dir.display().to_string(),
         dry_run: opts.dry_run,
-        issue_snapshots: ledger.issue_lines.len(),
+        issue_snapshots: ledger.issue_lines.len() + crdt_issue_count,
         issues: local_issues.len(),
         dependencies,
         events: local_events.len(),
@@ -779,16 +835,62 @@ mod tests {
     }
 
     #[test]
-    fn test_legacy_crdt_layout_is_refused() {
+    fn test_concatenated_jsonl_lines_are_split_and_merged() {
         let base = tempfile::tempdir().unwrap();
         let repo = base.path().join("repo");
         let store_root = base.path().join("store");
         init_git_repo(&repo);
-        fs::create_dir_all(repo.join(".trx/crdt")).unwrap();
-        fs::write(repo.join(".trx/crdt/x.automerge"), "junk").unwrap();
+        // Crash artifact: two event objects on one line (missing newline).
+        let a = r#"{"id":"ev-a","issue_id":"app-1","action":"created","timestamp":"2026-01-01T00:00:00Z"}"#;
+        let b = r#"{"id":"ev-b","issue_id":"app-1","action":"updated","timestamp":"2026-01-02T00:00:00Z"}"#;
+        seed_local(
+            &repo,
+            &[issue_snapshot("app-1", "x", 0)],
+            &[format!("{a}{b}")],
+            &[],
+        );
 
-        let error = migrate_repo(&repo, &store_root, None, MigrateOptions::default()).unwrap_err();
-        assert!(error.to_string().contains("crdt"));
-        assert!(central::read_marker(&repo).unwrap().is_none());
+        let report = migrate_repo(&repo, &store_root, None, MigrateOptions::default()).unwrap();
+        assert_eq!(
+            report.events, 2,
+            "both objects from the concatenated line survive"
+        );
+
+        let cs = CentralStore::open_at(store_root);
+        let central_repo = cs.find(&Checkout::at(&repo).unwrap()).unwrap().unwrap();
+        let events = key_map(&read_lines(&central_repo.events_path()).unwrap(), "id").unwrap();
+        assert!(events.contains_key("ev-a") && events.contains_key("ev-b"));
+    }
+
+    #[test]
+    fn test_legacy_crdt_layout_is_converted_then_migrated() {
+        use automerge::AutoCommit;
+        use automerge::transaction::Transactable;
+        let base = tempfile::tempdir().unwrap();
+        let repo = base.path().join("repo");
+        let store_root = base.path().join("store");
+        init_git_repo(&repo);
+
+        // A real automerge doc in the legacy layout (only id/title required).
+        let mut doc = AutoCommit::new();
+        doc.put(automerge::ROOT, "id", "app-crdt").unwrap();
+        doc.put(automerge::ROOT, "title", "from automerge era")
+            .unwrap();
+        let crdt_dir = repo.join(".trx/crdt");
+        fs::create_dir_all(&crdt_dir).unwrap();
+        fs::write(crdt_dir.join("app-crdt.automerge"), doc.save()).unwrap();
+
+        let report = migrate_repo(&repo, &store_root, None, MigrateOptions::default()).unwrap();
+        assert_eq!(report.issues, 1, "crdt issue migrated");
+        assert!(
+            !repo.join(".trx/crdt").exists(),
+            "legacy layout removed after conversion"
+        );
+        assert!(central::read_marker(&repo).unwrap().is_some());
+
+        let cs = CentralStore::open_at(store_root);
+        let central_repo = cs.find(&Checkout::at(&repo).unwrap()).unwrap().unwrap();
+        let issues = resolve_issues(&read_lines(&central_repo.issues_path()).unwrap()).unwrap();
+        assert_eq!(issues["app-crdt"].title, "from automerge era");
     }
 }
