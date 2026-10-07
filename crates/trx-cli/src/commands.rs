@@ -2379,18 +2379,25 @@ pub fn sync(message: Option<String>, dry_run: bool, no_commit: bool) -> Result<(
         return Ok(());
     }
 
-    // Git commit
+    // Git commit (quiet: "nothing to commit" goes to stdout and must be
+    // detected via the staged diff instead).
+    let staged = std::process::Command::new("git")
+        .args(["diff", "--cached", "--quiet", "--"])
+        .arg(&trx_dir)
+        .output()?;
+    if staged.status.success() {
+        println!("Nothing to sync");
+        return Ok(());
+    }
     let output = std::process::Command::new("git")
         .args(["commit", "-m", &msg])
         .output()?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("nothing to commit") {
-            println!("Nothing to sync");
-            return Ok(());
-        }
-        bail!("git commit failed: {}", stderr);
+        bail!(
+            "git commit failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     println!("{} Synced .trx/", "✓".green());
