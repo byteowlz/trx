@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## [0.8.0] - 2026-10-08
+
 ### Added
 
 - `default_mode = "central"` in the global config (mmry-style default): checkouts that have no `.trx` ledger yet automatically read/write the central store without anything written into the checkout; existing `.trx` ledgers keep repo-local mode unless marked, and `trx init` still forces an explicit repo-local ledger. Default remains `repo-local`.
