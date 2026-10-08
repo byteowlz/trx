@@ -7,6 +7,7 @@
 
 use anyhow::{Result, bail};
 use colored::Colorize;
+use std::fs;
 use trx_core::central::{self, CentralStore, Checkout};
 use trx_core::global_config::GlobalConfig;
 use trx_core::{Store, sync};
@@ -330,7 +331,14 @@ fn yes_no(value: bool) -> &'static str {
 
 /// Migrate the current repo's `.trx` ledger into the central store, or with
 /// `--all`, every repo-local ledger found under the configured scan roots.
-pub fn migrate(all: bool, dry_run: bool, untrack: bool, scan: &[String], json: bool) -> Result<()> {
+pub fn migrate(
+    all: bool,
+    dry_run: bool,
+    untrack: bool,
+    scan: &[String],
+    exclude: &[String],
+    json: bool,
+) -> Result<()> {
     let config = GlobalConfig::load()?;
     let resolved = resolve_store_root(&config, None, None)?;
     let opts = trx_core::migrate::MigrateOptions { dry_run, untrack };
@@ -351,7 +359,7 @@ pub fn migrate(all: bool, dry_run: bool, untrack: bool, scan: &[String], json: b
                 GlobalConfig::path()?.display()
             );
         }
-        trx_core::migrate::scan_for_ledgers(&roots, 8)?
+        filter_excluded(trx_core::migrate::scan_for_ledgers(&roots, 8)?, exclude)
     } else {
         vec![Store::current_root()?]
     };
@@ -428,7 +436,14 @@ pub fn migrate(all: bool, dry_run: bool, untrack: bool, scan: &[String], json: b
 
 /// Discover repo-local ledgers under scan roots and show/migrate them all;
 /// sets `migrate = "auto"` in the global config on a real run (mmry setup parity).
-pub fn setup(dry_run: bool, scans: &[String], depth: u32, yes: bool, json: bool) -> Result<()> {
+pub fn setup(
+    dry_run: bool,
+    scans: &[String],
+    depth: u32,
+    yes: bool,
+    exclude: &[String],
+    json: bool,
+) -> Result<()> {
     let config = GlobalConfig::load()?;
     let mut roots: Vec<std::path::PathBuf> = scans.iter().map(std::path::PathBuf::from).collect();
     if roots.is_empty() {
@@ -445,6 +460,7 @@ pub fn setup(dry_run: bool, scans: &[String], depth: u32, yes: bool, json: bool)
         );
     }
     let targets = trx_core::migrate::scan_for_ledgers(&roots, depth)?;
+    let targets = filter_excluded(targets, exclude);
 
     if dry_run || targets.is_empty() {
         if json {
@@ -489,7 +505,7 @@ pub fn setup(dry_run: bool, scans: &[String], depth: u32, yes: bool, json: bool)
     }
 
     // Real run: migrate everything, then flip the policy to auto.
-    migrate(true, false, false, scans, json)?;
+    migrate(true, false, false, scans, exclude, json)?;
     set_migrate_auto()?;
     if !json {
         println!(
@@ -504,6 +520,35 @@ pub fn setup(dry_run: bool, scans: &[String], depth: u32, yes: bool, json: bool)
 fn is_interactive() -> bool {
     use std::io::IsTerminal;
     std::io::stdin().is_terminal()
+}
+
+/// Drop scan targets under any `--exclude PATH` (repeatable; matched as a
+/// canonicalized path prefix, so excluding `~/byteowlz/trx` keeps the
+/// team-shared tracker repo-local).
+fn filter_excluded(
+    targets: Vec<std::path::PathBuf>,
+    exclude: &[String],
+) -> Vec<std::path::PathBuf> {
+    if exclude.is_empty() {
+        return targets;
+    }
+    let excluded: Vec<std::path::PathBuf> = exclude
+        .iter()
+        .filter_map(|path| {
+            trx_core::paths::expand_tilde(path)
+                .ok()
+                .map(|expanded| fs::canonicalize(&expanded).unwrap_or(expanded))
+        })
+        .collect();
+    targets
+        .into_iter()
+        .filter(|target| {
+            let canonical = fs::canonicalize(target).unwrap_or_else(|_| target.clone());
+            !excluded
+                .iter()
+                .any(|excluded| canonical.starts_with(excluded))
+        })
+        .collect()
 }
 
 /// Set `migrate = "auto"` in the global config, preserving comments:

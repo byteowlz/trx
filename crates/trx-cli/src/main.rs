@@ -504,6 +504,9 @@ enum Commands {
         /// Additional scan root for --all (repeatable)
         #[arg(long, value_name = "PATH")]
         scan: Vec<String>,
+        /// Skip repos under this path when --all (repeatable)
+        #[arg(long, value_name = "PATH")]
+        exclude: Vec<String>,
     },
 
     /// Find repo-local ledgers and migrate them all (mmry setup parity)
@@ -521,6 +524,9 @@ enum Commands {
         /// Migrate without confirmation (for agents/scripts)
         #[arg(short = 'y', long)]
         yes: bool,
+        /// Skip repos under this path (repeatable)
+        #[arg(long, value_name = "PATH")]
+        exclude: Vec<String>,
     },
 }
 
@@ -924,13 +930,15 @@ fn run(cli: Cli) -> Result<()> {
             dry_run,
             untrack,
             scan,
-        } => store_cmds::migrate(all, dry_run, untrack, &scan, cli.json),
+            exclude,
+        } => store_cmds::migrate(all, dry_run, untrack, &scan, &exclude, cli.json),
         Commands::Setup {
             dry_run,
             scan,
             depth,
             yes,
-        } => store_cmds::setup(dry_run, &scan, depth, yes, cli.json),
+            exclude,
+        } => store_cmds::setup(dry_run, &scan, depth, yes, &exclude, cli.json),
         Commands::Handover => commands::handover(cli.json),
         Commands::Search { query, all_repos } => commands::search(&query, all_repos, cli.json),
         Commands::Import { path, prefix } => commands::import(&path, prefix, cli.json),
