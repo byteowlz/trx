@@ -96,10 +96,56 @@ impl GitOutput {
     }
 }
 
-/// Run `git -C <dir> <args>` with a timeout. Never prompts (git plumbing
-/// with stdin closed); authentication is whatever git already has.
+/// Reuse OpenSSH authentication across git invocations and CLI commands.
+/// Only the socket is persisted; trx never reads or stores key passphrases.
+#[cfg(unix)]
+fn multiplexed_ssh_command(home: &Path) -> Result<String> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    let dir = home.join(".trx-ssh");
+    match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.into()),
+    }
+    let metadata = std::fs::symlink_metadata(&dir)?;
+    if !metadata.is_dir() || metadata.uid() != std::fs::metadata(home)?.uid() {
+        return Err(Error::Other("unsafe trx SSH socket directory".into()));
+    }
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    let path = dir.join("%C");
+    // %C expands to a 40-character hash. Stay below macOS's socket limit.
+    if path.as_os_str().len() + 38 >= 104 {
+        return Err(Error::Other("trx SSH socket path is too long".into()));
+    }
+    let quoted = path.to_string_lossy().replace('\'', "'\\''");
+    Ok(format!(
+        "ssh -o ControlMaster=auto -o ControlPersist=900 -o ControlPath='{quoted}'"
+    ))
+}
+
+/// Run `git -C <dir> <args>` with a timeout. SSH may request the initial
+/// passphrase through the terminal; subsequent connections reuse it.
 fn run_git(dir: &Path, args: &[&str], timeout: Duration) -> Result<GitOutput> {
-    let mut child = Command::new("git")
+    let mut command = Command::new("git");
+    #[cfg(unix)]
+    if std::env::var_os("GIT_SSH_COMMAND").is_none()
+        && std::env::var_os("GIT_SSH").is_none()
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        // Respect an explicit per-repository SSH transport too.
+        let custom = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["config", "--get", "core.sshCommand"])
+            .output()?;
+        if !custom.status.success() {
+            command.env(
+                "GIT_SSH_COMMAND",
+                multiplexed_ssh_command(Path::new(&home))?,
+            );
+        }
+    }
+    let mut child = command
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -619,6 +665,35 @@ mod tests {
             auto_push: true,
             timeout_secs: 10,
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_ssh_multiplexing_is_private_and_stable() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let first = multiplexed_ssh_command(home.path()).unwrap();
+        assert_eq!(first, multiplexed_ssh_command(home.path()).unwrap());
+        assert!(first.contains("ControlMaster=auto"));
+        assert!(first.contains("ControlPersist=900"));
+        assert!(first.contains("%C"));
+        assert_eq!(
+            std::fs::metadata(home.path().join(".trx-ssh"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_ssh_multiplexing_rejects_symlink_directory() {
+        let home = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(target.path(), home.path().join(".trx-ssh")).unwrap();
+        assert!(multiplexed_ssh_command(home.path()).is_err());
     }
 
     fn git(dir: &Path, args: &[&str]) {
