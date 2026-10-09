@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Fixed
+
+- `trx init --store` / `--store-root` now initializes central mode instead of silently ignoring store selection; central initialization also supports fresh checkouts.
+- Reject unknown global/store configuration fields and report configuration errors in `trx doctor`.
+
 ## [0.8.1] - 2026-10-08
 
 ### Added

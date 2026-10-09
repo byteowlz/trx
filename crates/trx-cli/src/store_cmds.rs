@@ -56,6 +56,16 @@ pub fn central_init(
     store_root: Option<&str>,
     json: bool,
 ) -> Result<()> {
+    central_init_impl(dry_run, store, store_root, json, None)
+}
+
+pub(crate) fn central_init_impl(
+    dry_run: bool,
+    store: Option<&str>,
+    store_root: Option<&str>,
+    json: bool,
+    prefix: Option<&str>,
+) -> Result<()> {
     let config = GlobalConfig::load()?;
     let resolved = resolve_store_root(&config, store, store_root)?;
 
@@ -64,6 +74,20 @@ pub fn central_init(
     let repo_root = match Store::current_root() {
         Ok(root) => root,
         Err(_) if dry_run => std::env::current_dir()?,
+        Err(_) if !std::path::Path::new(".trx").exists() => {
+            // Fresh clones/worktrees have no .trx yet: create the minimal
+            // checkout state so central mode works with a single command.
+            let trx_dir = std::path::Path::new(".trx");
+            std::fs::create_dir_all(trx_dir)?;
+            let prefix = prefix.unwrap_or("trx");
+            if !trx_dir.join("config.toml").exists() {
+                std::fs::write(
+                    trx_dir.join("config.toml"),
+                    format!("# trx configuration\nprefix = \"{prefix}\"\n"),
+                )?;
+            }
+            Store::current_root()?
+        }
         Err(error) => return Err(error.into()),
     };
     let checkout = Checkout::at(&repo_root)?;
@@ -106,9 +130,10 @@ pub fn central_init(
     if !trx_dir.exists() {
         std::fs::create_dir_all(trx_dir)?;
         if !trx_dir.join("config.toml").exists() {
+            let prefix = prefix.unwrap_or("trx");
             std::fs::write(
                 trx_dir.join("config.toml"),
-                "# trx configuration\nprefix = \"trx\"\n",
+                format!("# trx configuration\nprefix = \"{prefix}\"\n"),
             )?;
         }
     }
@@ -732,7 +757,13 @@ fn set_config_key(key: &str, value: &str) -> Result<()> {
         }
     }
     if !replaced {
-        lines.push(format!("{key} = \"{value}\""));
+        // Top-level keys must come before the first [table] header, else TOML
+        // silently scopes them into that table.
+        let first_table = lines
+            .iter()
+            .position(|line| line.trim_start().starts_with('['))
+            .unwrap_or(lines.len());
+        lines.insert(first_table, format!("{key} = \"{value}\""));
     }
     let mut content = lines.join("\n");
     if !content.ends_with('\n') {

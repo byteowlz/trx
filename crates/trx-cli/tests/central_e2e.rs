@@ -583,6 +583,76 @@ fn onboard_bootstraps_store_policy_and_bulk_migrates_in_one_command() {
 }
 
 #[test]
+fn init_with_store_opts_into_central_mode_and_misplaced_keys_are_rejected() {
+    let env = Env::new();
+    let base = tempfile::tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let store = base.path().join("store");
+    let config_file = base.path().join("trx-config.toml");
+    std::fs::write(
+        &config_file,
+        format!(
+            "store_root = \"{}\"\n\n[stores.optimaite]\nroot = \"{}\"\n",
+            store.display(),
+            base.path().join("optimaite-store").display()
+        ),
+    )
+    .unwrap();
+    init_git_repo(&repo);
+
+    // `trx init --store` initializes INTO central mode (prefix carried over).
+    repo_cmd(&env, &repo)
+        .env("TRX_CONFIG", &config_file)
+        .args(["init", "--prefix", "opt", "--store", "optimaite"])
+        .assert()
+        .success()
+        .stdout(contains("Central mode enabled"));
+    assert!(repo.join(".trx/central").exists());
+    assert_eq!(
+        std::fs::read_to_string(repo.join(".trx/config.toml")).unwrap(),
+        "# trx configuration\nprefix = \"opt\"\n"
+    );
+    repo_cmd(&env, &repo)
+        .env("TRX_CONFIG", &config_file)
+        .args(["create", "in the project store"])
+        .assert()
+        .success();
+    repo_cmd(&env, &repo)
+        .env("TRX_CONFIG", &config_file)
+        .args(["list"])
+        .assert()
+        .success()
+        .stdout(contains("in the project store"));
+    // It landed in the NAMED store, not the default root.
+    assert!(
+        base.path()
+            .join("optimaite-store/repos")
+            .read_dir()
+            .unwrap()
+            .count()
+            >= 1
+    );
+
+    // A `default_mode` key misplaced into [stores.<name>] is a config error,
+    // not a silently ignored setting.
+    std::fs::write(
+        &config_file,
+        format!(
+            "store_root = \"{}\"\n[stores.optimaite]\nroot = \"{}\"\ndefault_mode = \"central\"\n",
+            store.display(),
+            base.path().join("optimaite-store").display()
+        ),
+    )
+    .unwrap();
+    repo_cmd(&env, &repo)
+        .env("TRX_CONFIG", &config_file)
+        .args(["doctor"])
+        .assert()
+        .failure()
+        .stdout(contains("unknown field"));
+}
+
+#[test]
 fn store_sync_connects_two_machines_and_drains_offline_pending() {
     let env = Env::new();
     let base = tempfile::tempdir().unwrap();

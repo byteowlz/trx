@@ -125,6 +125,26 @@ pub fn doctor(fix: bool, json: bool) -> Result<()> {
             fixed: false,
         });
     }
+    match trx_core::GlobalConfig::load() {
+        Ok(config) => checks.push(DoctorCheck {
+            name: "default_mode",
+            status: "ok",
+            message: format!(
+                "default_mode = {:?} (checkouts without .trx)",
+                config.default_mode
+            ),
+            fixed: false,
+        }),
+        Err(error) => {
+            ok = false;
+            checks.push(DoctorCheck {
+                name: "default_mode",
+                status: "error",
+                message: format!("global config invalid: {error}"),
+                fixed: false,
+            });
+        }
+    }
     let attrs_content = if attrs_path.exists() {
         std::fs::read_to_string(&attrs_path)?
     } else {

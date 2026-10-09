@@ -40,6 +40,13 @@ enum Commands {
         /// Issue ID prefix
         #[arg(long, default_value = "trx")]
         prefix: String,
+        /// Initialize into central mode backed by this named store instead
+        /// (equivalent to `trx central init --store`)
+        #[arg(long)]
+        store: Option<String>,
+        /// Initialize into central mode backed by this store root instead
+        #[arg(long, value_name = "PATH")]
+        store_root: Option<String>,
     },
 
     /// Check trx repository health and optionally repair safe setup issues
@@ -792,7 +799,26 @@ fn main() -> Result<()> {
 
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
-        Commands::Init { prefix } => commands::init(&prefix),
+        Commands::Init {
+            prefix,
+            store,
+            store_root,
+        } => {
+            if store.is_some() || store_root.is_some() {
+                // Central-mode init: explicit store selection means the user
+                // wants this checkout in the central store, not a repo-local
+                // ledger (a plain `trx init` still forces repo-local).
+                store_cmds::central_init_impl(
+                    false,
+                    store.as_deref(),
+                    store_root.as_deref(),
+                    cli.json,
+                    Some(&prefix),
+                )
+            } else {
+                commands::init(&prefix)
+            }
+        }
         Commands::Doctor { fix } => commands::doctor(fix, cli.json),
         Commands::Create {
             title,

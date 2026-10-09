@@ -50,6 +50,7 @@ impl Default for SyncConfig {
 
 /// An additional named central store.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StoreDef {
     /// Absolute or `~`-relative path of the store root.
     pub root: String,
@@ -84,7 +85,7 @@ pub enum DefaultMode {
 
 /// Global per-user configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct GlobalConfig {
     /// Override for the default central store root.
     pub store_root: Option<String>,
