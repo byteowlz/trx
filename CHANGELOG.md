@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## [0.8.2] - 2026-10-09
+
 ### Fixed
 
 - Central initialization records repository-identity bindings in user-local configuration, writes nothing into the checkout, and resolves named stores locally; legacy checkout markers remain readable.
