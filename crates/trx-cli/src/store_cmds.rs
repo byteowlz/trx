@@ -546,6 +546,129 @@ pub fn setup(
     Ok(())
 }
 
+/// One-command machine bootstrap for the central store:
+///
+/// 1. point the default store at `--remote` (creating/merging it — safe on a
+///    fresh machine: an empty local store merges the remote down)
+/// 2. opt into `migrate = "auto"` (and optionally `default_mode = "central"`)
+/// 3. with `--scan`: bulk-migrate this machine's repo-local ledgers
+///
+/// Idempotent: re-running is a no-op for everything already done.
+pub fn onboard(
+    remote: &str,
+    scans: &[String],
+    depth: u32,
+    exclude: &[String],
+    default_central: bool,
+    yes: bool,
+    json: bool,
+) -> Result<()> {
+    let config = GlobalConfig::load()?;
+    let store_root = config.store_root(None)?;
+
+    // 1. Store bootstrap / remote reconciliation (union-merge, never resets).
+    let sync_outcome = if store_root.join(".git").exists() {
+        sync::full_sync(&store_root, &config.sync)?
+    } else {
+        sync::init_remote(&store_root, remote, &config.sync)?
+    };
+
+    // 2. Global policy.
+    set_migrate_auto()?;
+    if default_central {
+        set_config_key("default_mode", "central")?;
+    }
+
+    // 3. Bulk migration of this machine's ledgers (skips already-central).
+    let migration_summary = if scans.is_empty() {
+        None
+    } else {
+        if !yes && !is_interactive() {
+            bail!(
+                "Refusing to migrate repo-local ledgers non-interactively without --yes. Everything else is done; re-run with --yes to migrate."
+            );
+        }
+        let roots: Vec<std::path::PathBuf> = scans.iter().map(std::path::PathBuf::from).collect();
+        let targets = filter_excluded(trx_core::migrate::scan_for_ledgers(&roots, depth)?, exclude);
+        let mut migrated = 0usize;
+        let mut failed = 0usize;
+        for target in &targets {
+            match trx_core::migrate::migrate_repo(
+                target,
+                &store_root,
+                None,
+                trx_core::migrate::MigrateOptions::default(),
+            ) {
+                Ok(report) => {
+                    if !report.already_central {
+                        migrated += 1;
+                    }
+                }
+                Err(error) => {
+                    failed += 1;
+                    if json {
+                        eprintln!("trx: warning: {}: {error}", target.display());
+                    } else {
+                        println!("{} {}: {error}", "✗".red(), target.display());
+                    }
+                }
+            }
+        }
+        Some((targets.len(), migrated, failed))
+    };
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "store_root": store_root.display().to_string(),
+                "remote": remote,
+                "pushed": sync_outcome.pushed,
+                "pending_commits": sync_outcome.pending_commits,
+                "migrate_policy": "auto",
+                "default_mode": if default_central { "central" } else { "repo-local" },
+                "found": migration_summary.as_ref().map(|(found, _, _)| *found),
+                "migrated": migration_summary.as_ref().map(|(_, migrated, _)| *migrated),
+                "failed": migration_summary.as_ref().map(|(_, _, failed)| *failed),
+            })
+        );
+        return Ok(());
+    }
+
+    println!(
+        "{} Store: {} (remote {})",
+        "✓".green(),
+        store_root.display(),
+        remote
+    );
+    if sync_outcome.pushed {
+        println!("  pushed to remote");
+    } else if sync_outcome.pending_commits > 0 {
+        println!(
+            "  {} pending commits — next online sync drains them",
+            "!".yellow()
+        );
+    }
+    println!("  migrate policy: auto");
+    if default_central {
+        println!("  default mode:   central (new checkouts without .trx go central automatically)");
+    }
+    if let Some((found, migrated, failed)) = migration_summary {
+        println!(
+            "{} migrated {} of {} repo-local ledger(s){}",
+            "✓".green(),
+            migrated,
+            found,
+            if failed > 0 {
+                format!(", {failed} failed (see above)")
+            } else {
+                String::new()
+            }
+        );
+    }
+    Ok(())
+}
+
 fn is_interactive() -> bool {
     use std::io::IsTerminal;
     std::io::stdin().is_terminal()
@@ -583,6 +706,12 @@ fn filter_excluded(
 /// Set `migrate = "auto"` in the global config, preserving comments:
 /// replace an existing `migrate = ...` line in place, else append.
 fn set_migrate_auto() -> Result<()> {
+    set_config_key("migrate", "auto")
+}
+
+/// Set a top-level TOML key in the global config, preserving comments:
+/// replace an existing `key = ...` line in place, else append.
+fn set_config_key(key: &str, value: &str) -> Result<()> {
     let path = GlobalConfig::path()?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -597,13 +726,13 @@ fn set_migrate_auto() -> Result<()> {
     };
     let mut replaced = false;
     for line in &mut lines {
-        if line.trim_start().starts_with("migrate") {
-            *line = "migrate = \"auto\"".to_string();
+        if line.trim_start().starts_with(key) {
+            *line = format!("{key} = \"{value}\"");
             replaced = true;
         }
     }
     if !replaced {
-        lines.push("migrate = \"auto\"".to_string());
+        lines.push(format!("{key} = \"{value}\""));
     }
     let mut content = lines.join("\n");
     if !content.ends_with('\n') {

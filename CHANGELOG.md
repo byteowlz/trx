@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `trx onboard --remote URL [--scan PATH]... [--exclude PATH]... [--default-central] [--yes]`: one-command machine bootstrap — syncs the central store with the remote (bootstrapping a fresh local store from it), sets `migrate = "auto"`, optionally `default_mode = "central"`, and bulk-migrates the machine's repo-local ledgers. Idempotent; re-running reports what is left.
 - `setup`/`migrate --all --exclude PATH` (repeatable): skip team-shared repos during bulk migration.
 - `trx store sync ...` is checkout-aware: run from inside a central-mode checkout, it targets that checkout's store without needing `--store` (precedence: flags > env > marker > config).
 

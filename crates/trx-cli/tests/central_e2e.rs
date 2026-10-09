@@ -511,6 +511,78 @@ fn default_mode_central_serves_trx_less_checkouts_without_writing_to_them() {
 }
 
 #[test]
+fn onboard_bootstraps_store_policy_and_bulk_migrates_in_one_command() {
+    let env = Env::new();
+    let base = tempfile::tempdir().unwrap();
+    let root = base.path().join("workspaces");
+    let store = base.path().join("store");
+    let remote = base.path().join("remote.git");
+    let config_file = base.path().join("trx-config.toml");
+    std::fs::write(&config_file, "# onboard test\n").unwrap();
+
+    for name in ["one", "two"] {
+        let repo = root.join(name);
+        init_git_repo(&repo);
+        repo_cmd(&env, &repo).args(["init"]).assert().success();
+        repo_cmd(&env, &repo)
+            .args(["create", &format!("pre-existing {name}")])
+            .assert()
+            .success();
+    }
+    std::fs::create_dir_all(&remote).unwrap();
+    git(&remote, &["init", "-q", "--bare", "-b", "main"]);
+
+    // One command on a fresh machine: bootstrap + policy + bulk migration.
+    repo_cmd(&env, &root)
+        .env("TRX_CONFIG", &config_file)
+        .env("TRX_STORE_ROOT", &store)
+        .args(["onboard", "--remote"])
+        .arg(remote.join(".").to_str().unwrap())
+        .args(["--scan"])
+        .arg(&root)
+        .args(["--exclude"])
+        .arg(root.join("two"))
+        .arg("--yes")
+        .assert()
+        .success()
+        .stdout(contains("migrated 1 of 1 repo-local ledger(s)"));
+
+    // Policy + config written.
+    let config_text = std::fs::read_to_string(&config_file).unwrap();
+    assert!(config_text.contains("migrate = \"auto\""));
+
+    // `one` is central and readable; `two` (excluded) still serves locally.
+    repo_cmd(&env, &root.join("one"))
+        .env("TRX_CONFIG", &config_file)
+        .env("TRX_STORE_ROOT", &store)
+        .args(["list"])
+        .assert()
+        .success()
+        .stdout(contains("pre-existing one"));
+    repo_cmd(&env, &root.join("two"))
+        .env("TRX_CONFIG", &config_file)
+        .args(["list"])
+        .assert()
+        .success()
+        .stdout(contains("pre-existing two"));
+
+    // Idempotent: second onboard reports nothing left to migrate.
+    repo_cmd(&env, &root)
+        .env("TRX_CONFIG", &config_file)
+        .env("TRX_STORE_ROOT", &store)
+        .args(["onboard", "--remote"])
+        .arg(remote.join(".").to_str().unwrap())
+        .args(["--scan"])
+        .arg(&root)
+        .args(["--exclude"])
+        .arg(root.join("two"))
+        .arg("--yes")
+        .assert()
+        .success()
+        .stdout(contains("migrated 0 of 0 repo-local ledger(s)"));
+}
+
+#[test]
 fn store_sync_connects_two_machines_and_drains_offline_pending() {
     let env = Env::new();
     let base = tempfile::tempdir().unwrap();

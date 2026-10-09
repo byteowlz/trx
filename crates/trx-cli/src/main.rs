@@ -509,6 +509,29 @@ enum Commands {
         exclude: Vec<String>,
     },
 
+    /// Bootstrap this machine for the central store: sync the store with a
+    /// remote, set migrate=auto, optionally bulk-migrate local ledgers
+    Onboard {
+        /// Remote URL for the default central store (push-to-create works)
+        #[arg(long)]
+        remote: String,
+        /// Bulk-migrate repo-local ledgers under this path (repeatable)
+        #[arg(long, value_name = "PATH")]
+        scan: Vec<String>,
+        /// Maximum depth to descend when scanning
+        #[arg(long, value_name = "N", default_value_t = 6)]
+        depth: u32,
+        /// Skip repos under this path (repeatable)
+        #[arg(long, value_name = "PATH")]
+        exclude: Vec<String>,
+        /// New checkouts without .trx go central automatically
+        #[arg(long)]
+        default_central: bool,
+        /// Migrate without confirmation (for agents/scripts)
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+
     /// Find repo-local ledgers and migrate them all (mmry setup parity)
     Setup {
         /// Show what would be migrated without writing anything
@@ -932,6 +955,22 @@ fn run(cli: Cli) -> Result<()> {
             scan,
             exclude,
         } => store_cmds::migrate(all, dry_run, untrack, &scan, &exclude, cli.json),
+        Commands::Onboard {
+            remote,
+            scan,
+            depth,
+            exclude,
+            default_central,
+            yes,
+        } => store_cmds::onboard(
+            &remote,
+            &scan,
+            depth,
+            &exclude,
+            default_central,
+            yes,
+            cli.json,
+        ),
         Commands::Setup {
             dry_run,
             scan,
