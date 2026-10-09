@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Central initialization records repository-identity bindings in user-local configuration, writes nothing into the checkout, and resolves named stores locally; legacy checkout markers remain readable.
 - Central-store sync reuses OpenSSH connections for 15 minutes on Unix, avoiding repeated key passphrase prompts without an SSH agent; explicit SSH transport overrides are preserved.
 - `trx init --store` / `--store-root` now initializes central mode instead of silently ignoring store selection; central initialization also supports fresh checkouts.
 - Reject unknown global/store configuration fields and report configuration errors in `trx doctor`.

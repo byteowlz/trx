@@ -73,21 +73,7 @@ pub(crate) fn central_init_impl(
     // A missing .trx is part of the plan ("would create") instead of an error.
     let repo_root = match Store::current_root() {
         Ok(root) => root,
-        Err(_) if dry_run => std::env::current_dir()?,
-        Err(_) if !std::path::Path::new(".trx").exists() => {
-            // Fresh clones/worktrees have no .trx yet: create the minimal
-            // checkout state so central mode works with a single command.
-            let trx_dir = std::path::Path::new(".trx");
-            std::fs::create_dir_all(trx_dir)?;
-            let prefix = prefix.unwrap_or("trx");
-            if !trx_dir.join("config.toml").exists() {
-                std::fs::write(
-                    trx_dir.join("config.toml"),
-                    format!("# trx configuration\nprefix = \"{prefix}\"\n"),
-                )?;
-            }
-            Store::current_root()?
-        }
+        Err(trx_core::Error::NotInitialized) => Checkout::at(&std::env::current_dir()?)?.root,
         Err(error) => return Err(error.into()),
     };
     let checkout = Checkout::at(&repo_root)?;
@@ -124,21 +110,6 @@ pub(crate) fn central_init_impl(
         return Ok(());
     }
 
-    // Fresh clones/worktrees have no .trx/ yet: create the minimal checkout
-    // state so central mode works with a single command.
-    let trx_dir = std::path::Path::new(".trx");
-    if !trx_dir.exists() {
-        std::fs::create_dir_all(trx_dir)?;
-        if !trx_dir.join("config.toml").exists() {
-            let prefix = prefix.unwrap_or("trx");
-            std::fs::write(
-                trx_dir.join("config.toml"),
-                format!("# trx configuration\nprefix = \"{prefix}\"\n"),
-            )?;
-        }
-    }
-    let repo_root = Store::current_root()?;
-
     // Refuse to shadow a non-empty repo-local ledger: migration lands with
     // `trx migrate` (epic trx-a1s8.5). Until then, enabling central mode on a
     // populated repo would hide its issues.
@@ -154,6 +125,8 @@ pub(crate) fn central_init_impl(
         let same_root = store_root.is_none()
             || marker.store_root.as_deref() == store_root.map(str::to_string).as_deref();
         if same_store && same_root {
+            // Re-running init repairs legacy markers containing resolved paths.
+            central::write_marker(&repo_root, store, store_root.map(std::path::Path::new))?;
             if json {
                 println!(
                     "{}",
@@ -171,7 +144,12 @@ pub(crate) fn central_init_impl(
 
     let cs = CentralStore::open_at(resolved.clone());
     let repo = cs.register(&checkout)?;
-    central::write_marker(&repo_root, store, Some(resolved.as_path()))?;
+    if let Some(prefix) = prefix {
+        let mut settings = trx_core::Config::load(&repo.config_path())?;
+        settings.prefix = prefix.to_owned();
+        settings.save(&repo.config_path())?;
+    }
+    central::write_marker(&repo_root, store, store_root.map(std::path::Path::new))?;
 
     // Verify routing end-to-end.
     let verified = Store::open_at(repo_root.clone())?;

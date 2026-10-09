@@ -52,6 +52,11 @@ impl Store {
     /// (nothing is written into the checkout). Existing `.trx` ledgers keep
     /// repo-local mode unless a `.trx/central` marker opts them in.
     pub fn open() -> Result<Self> {
+        let cwd = std::env::current_dir()?;
+        let checkout_root = Self::find_git_root_from(&cwd).unwrap_or(cwd);
+        if central::read_marker(&checkout_root)?.is_some() {
+            return Self::open_at(checkout_root);
+        }
         match Self::find_root() {
             Ok(root) => Self::open_at(root),
             Err(Error::NotInitialized)
@@ -70,12 +75,17 @@ impl Store {
 
     /// The store root for the current directory (no CWD mutation).
     pub fn current_root() -> Result<PathBuf> {
+        let cwd = std::env::current_dir()?;
+        let root = Self::find_git_root_from(&cwd).unwrap_or(cwd);
+        if central::read_marker(&root)?.is_some() {
+            return Ok(root);
+        }
         Self::find_root()
     }
 
     /// Open the store at an explicit repo root (no CWD probing).
     pub fn open_at(root: PathBuf) -> Result<Self> {
-        if !root.join(TRX_DIR).exists() {
+        if !root.join(TRX_DIR).exists() && central::read_marker(&root)?.is_none() {
             return Err(Error::NotInitialized);
         }
         let mut store = Self {

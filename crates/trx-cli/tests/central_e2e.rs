@@ -152,7 +152,7 @@ fn central_init_routes_issues_to_the_store_and_a_worktree_sees_them() {
         .stdout(contains("Central mode enabled"));
 
     // Marker exists and is idempotent.
-    assert!(repo.join(".trx/central").is_file());
+    assert!(!repo.join(".trx/central").exists());
     repo_cmd(&env, &repo)
         .args(["central", "init", "--store-root"])
         .arg(&store)
@@ -270,7 +270,7 @@ fn migrate_moves_repo_local_ledger_to_the_central_store() {
         .success()
         .stdout(contains("2 issues"))
         .stdout(contains("backup:"));
-    assert!(repo.join(".trx/central").exists());
+    assert!(!repo.join(".trx/central").exists());
     assert!(repo.join(".trx/MIGRATED").exists());
     assert!(!repo.join(".trx/issues.jsonl").exists());
     let status = StdCommand::new("git")
@@ -607,16 +607,17 @@ fn init_with_store_opts_into_central_mode_and_misplaced_keys_are_rejected() {
         .assert()
         .success()
         .stdout(contains("Central mode enabled"));
-    assert!(repo.join(".trx/central").exists());
-    assert_eq!(
-        std::fs::read_to_string(repo.join(".trx/config.toml")).unwrap(),
-        "# trx configuration\nprefix = \"opt\"\n"
+    assert!(
+        !repo.join(".trx").exists(),
+        "central init must not touch checkout"
     );
     repo_cmd(&env, &repo)
         .env("TRX_CONFIG", &config_file)
         .args(["create", "in the project store"])
         .assert()
-        .success();
+        .success()
+        .stdout(contains("opt-"));
+    assert!(!repo.join(".trx").exists());
     repo_cmd(&env, &repo)
         .env("TRX_CONFIG", &config_file)
         .args(["list"])

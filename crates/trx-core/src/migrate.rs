@@ -419,7 +419,13 @@ pub fn migrate_repo(
         chrono::Utc::now().to_rfc3339(),
     );
     fs::write(trx_dir.join(MIGRATED_NOTE), note)?;
-    central::write_marker(repo_root, store_name, Some(resolved_store_root))?;
+    // Default/named stores are portable logical selections. Retain a path
+    // only for an independently supplied custom root.
+    let default_root = crate::GlobalConfig::load()?.store_root(None)?;
+    let explicit_root = (store_name.is_none()
+        && (resolved_store_root != default_root || std::env::var_os("TRX_STORE_ROOT").is_some()))
+    .then_some(resolved_store_root);
+    central::write_marker(repo_root, store_name, explicit_root)?;
 
     Ok(MigrateReport {
         backups,
@@ -494,8 +500,7 @@ pub fn scan_for_ledgers(roots: &[PathBuf], max_depth: u32) -> Result<Vec<PathBuf
         }
         let mut stack = vec![(root.clone(), 0u32)];
         while let Some((dir, depth)) = stack.pop() {
-            if dir.join(".trx").join(ISSUES_FILE).is_file()
-                && !dir.join(".trx").join("central").exists()
+            if dir.join(".trx").join(ISSUES_FILE).is_file() && central::read_marker(&dir)?.is_none()
             {
                 found.insert(dir.clone());
             }
@@ -730,7 +735,7 @@ mod tests {
         .unwrap();
         assert_eq!(before, after);
         assert!(repo2.join(".trx").join(ISSUES_FILE).exists());
-        assert!(central::read_marker(&repo2).unwrap().is_none());
+        assert!(!central::marker_path(&repo2).exists());
     }
 
     #[test]

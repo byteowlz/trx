@@ -133,7 +133,7 @@ impl CentralRepo {
 }
 
 /// Contents of a `.trx/central` marker.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct CentralMarker {
     /// Named store to use; `None` selects the default store.
     pub store: Option<String>,
@@ -149,6 +149,10 @@ pub fn marker_path(root: &Path) -> PathBuf {
 
 /// Read the `.trx/central` marker, if present.
 pub fn read_marker(root: &Path) -> Result<Option<CentralMarker>> {
+    let binding = binding_path(root)?;
+    if binding.is_file() {
+        return Ok(Some(serde_json::from_str(&fs::read_to_string(binding)?)?));
+    }
     let path = marker_path(root);
     if !path.is_file() {
         return Ok(None);
@@ -170,27 +174,46 @@ pub fn read_marker(root: &Path) -> Result<Option<CentralMarker>> {
             }
         }
     }
+    // Older releases recorded both fields. A logical store name always wins
+    // over a stale machine-specific path from another teammate's checkout.
+    if marker.store.is_some() {
+        marker.store_root = None;
+    }
     Ok(Some(marker))
 }
 
 /// Write the `.trx/central` marker selecting central mode for a checkout.
 pub fn write_marker(root: &Path, store: Option<&str>, store_root: Option<&Path>) -> Result<()> {
-    let path = marker_path(root);
+    let path = binding_path(root)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let mut content = String::from(
-        "# trx central mode: the authoritative ledger for this repository lives in the\n\
-         # per-user central store. Remove this file to return to the repo-local .trx/ ledger.\n",
-    );
-    if let Some(store) = store {
-        content.push_str(&format!("store = \"{store}\"\n"));
-    }
-    if let Some(store_root) = store_root {
-        content.push_str(&format!("store_root = \"{}\"\n", store_root.display()));
-    }
-    fs::write(path, content)?;
+    let marker = CentralMarker {
+        store: store.map(str::to_owned),
+        store_root: store_root
+            .filter(|_| store.is_none())
+            .map(|p| p.to_string_lossy().into_owned()),
+    };
+    let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    fs::write(&temporary, serde_json::to_string_pretty(&marker)?)?;
+    fs::rename(temporary, path)?;
     Ok(())
+}
+
+fn binding_path(root: &Path) -> Result<PathBuf> {
+    let checkout = Checkout::at(root)?;
+    #[cfg(test)]
+    let checkout = Checkout {
+        identity: format!(
+            "{}:{}",
+            std::thread::current().name().unwrap_or("test"),
+            checkout.identity
+        ),
+        ..checkout
+    };
+    Ok(crate::paths::config_base()?
+        .join("trx/bindings")
+        .join(format!("{}.json", short_id(&checkout.identity))))
 }
 
 /// Handle for one central store root.
@@ -693,11 +716,20 @@ mod tests {
             })
         );
         write_marker(temp.path(), Some("work"), Some(Path::new("/data/trx-work"))).unwrap();
+        assert!(!temp.path().join(".trx").exists());
+        fs::remove_file(binding_path(temp.path()).unwrap()).unwrap();
+        fs::create_dir_all(temp.path().join(".trx")).unwrap();
+        // Legacy markers from a teammate must not pin this machine's root.
+        fs::write(
+            marker_path(temp.path()),
+            "store = \"work\"\nstore_root = \"/Users/other/trx\"\n",
+        )
+        .unwrap();
         assert_eq!(
             read_marker(temp.path()).unwrap(),
             Some(CentralMarker {
                 store: Some("work".into()),
-                store_root: Some("/data/trx-work".into()),
+                store_root: None,
             })
         );
     }
