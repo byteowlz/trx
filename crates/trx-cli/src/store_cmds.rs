@@ -20,6 +20,35 @@ fn resolve_store_root(
     Ok(config.resolve_store_root(store, store_root)?)
 }
 
+/// Resolve the store root for `store`-level operations, checkout-aware when
+/// no explicit selection is made: standing in a central-mode checkout (e.g. a
+/// project bound to its own named store) targets THAT store instead of the
+/// default one.
+///
+/// Precedence: --store-root/--store flags > TRX_STORE_ROOT/TRX_STORE env >
+/// the checkout's `.trx/central` marker > global config default.
+fn resolve_store_root_checkout_aware(
+    config: &GlobalConfig,
+    store: Option<&str>,
+    store_root: Option<&str>,
+) -> Result<std::path::PathBuf> {
+    if store_root.is_some() || store.is_some() {
+        return Ok(config.resolve_store_root(store, store_root)?);
+    }
+    if std::env::var_os("TRX_STORE_ROOT").is_some() || std::env::var_os("TRX_STORE").is_some() {
+        return Ok(config.store_root(None)?);
+    }
+    if let Ok(root) = Store::current_root()
+        && let Some(marker) = central::read_marker(&root)?
+    {
+        if let Some(recorded) = &marker.store_root {
+            return Ok(trx_core::paths::expand_tilde(recorded)?);
+        }
+        return Ok(config.store_root(marker.store.as_deref())?);
+    }
+    Ok(config.store_root(None)?)
+}
+
 /// Opt the current repository into central mode.
 pub fn central_init(
     dry_run: bool,
@@ -241,7 +270,7 @@ pub fn store_sync(
     json: bool,
 ) -> Result<()> {
     let config = GlobalConfig::load()?;
-    let resolved = resolve_store_root(&config, store, store_root)?;
+    let resolved = resolve_store_root_checkout_aware(&config, store, store_root)?;
     if !matches!(action, Some(crate::StoreSyncAction::Init { .. }))
         && !resolved.join(".git").exists()
     {

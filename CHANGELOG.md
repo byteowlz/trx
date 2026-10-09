@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `setup`/`migrate --all --exclude PATH` (repeatable): skip team-shared repos during bulk migration.
+- `trx store sync ...` is checkout-aware: run from inside a central-mode checkout, it targets that checkout's store without needing `--store` (precedence: flags > env > marker > config).
+
 - `default_mode = "central"` in the global config (mmry-style default): checkouts that have no `.trx` ledger yet automatically read/write the central store without anything written into the checkout; existing `.trx` ledgers keep repo-local mode unless marked, and `trx init` still forces an explicit repo-local ledger. Default remains `repo-local`.
 - Migration into the central store (slice trx-a1s8.5): `trx migrate [--dry-run] [--all] [--untrack] [--scan PATH]` moves a repo-local `.trx` ledger into the central store — merge by id over the append-only files (issue snapshots keep full history, events/verifications dedupe by id), conflicts (same id, divergent content, no newer side) abort with nothing moved, the central ledger is verified complete before the local files are renamed to `*.migrated-<timestamp>` backups, a `.trx/MIGRATED` note is written, and the checkout opts into central mode. `--untrack` removes migrated ledgers from the git index (left uncommitted); re-running after migration is a no-op.
 - `trx setup [--dry-run] [--scan PATH]... [--depth N] [--yes] [--json]` discovers repo-local ledgers under scan roots (skipping dependency/build/cache dirs), shows the plan, migrates them all, and sets `migrate = "auto"` in the global config (comments preserved). Non-interactive runs require `--yes`.
