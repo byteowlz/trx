@@ -7,13 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
-## [0.8.0] - 2026-10-08
+## [0.8.1] - 2026-10-08
 
 ### Added
 
 - `trx onboard --remote URL [--scan PATH]... [--exclude PATH]... [--default-central] [--yes]`: one-command machine bootstrap — syncs the central store with the remote (bootstrapping a fresh local store from it), sets `migrate = "auto"`, optionally `default_mode = "central"`, and bulk-migrates the machine's repo-local ledgers. Idempotent; re-running reports what is left.
 - `setup`/`migrate --all --exclude PATH` (repeatable): skip team-shared repos during bulk migration.
+
+### Fixed
+
+- `trx sync` no longer fails on a clean repository (quiet `git commit` reports "nothing to commit" on stdout, which the old check missed); nothing-to-commit is now detected via the staged diff.
 - `trx store sync ...` is checkout-aware: run from inside a central-mode checkout, it targets that checkout's store without needing `--store` (precedence: flags > env > marker > config).
+
+## [0.8.0] - 2026-10-08
+
+### Added
 
 - `default_mode = "central"` in the global config (mmry-style default): checkouts that have no `.trx` ledger yet automatically read/write the central store without anything written into the checkout; existing `.trx` ledgers keep repo-local mode unless marked, and `trx init` still forces an explicit repo-local ledger. Default remains `repo-local`.
 - Migration into the central store (slice trx-a1s8.5): `trx migrate [--dry-run] [--all] [--untrack] [--scan PATH]` moves a repo-local `.trx` ledger into the central store — merge by id over the append-only files (issue snapshots keep full history, events/verifications dedupe by id), conflicts (same id, divergent content, no newer side) abort with nothing moved, the central ledger is verified complete before the local files are renamed to `*.migrated-<timestamp>` backups, a `.trx/MIGRATED` note is written, and the checkout opts into central mode. `--untrack` removes migrated ledgers from the git index (left uncommitted); re-running after migration is a no-op.
