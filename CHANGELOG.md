@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Fixed
+
+- Generated central-store bindings now live in `$XDG_STATE_HOME/trx/bindings` (default `~/.local/state/trx/bindings`); legacy config-directory bindings migrate on access, with conflicting bindings preserved and reported.
+
 ## [0.8.2] - 2026-10-09
 
 ### Fixed

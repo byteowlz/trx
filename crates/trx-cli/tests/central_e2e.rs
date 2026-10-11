@@ -45,6 +45,7 @@ impl Env {
     fn apply(&self, cmd: &mut Command) {
         cmd.env("HOME", self.home.path())
             .env("XDG_CONFIG_HOME", self.home.path().join(".config"))
+            .env("XDG_STATE_HOME", self.home.path().join(".local/state"))
             .env("GIT_AUTHOR_NAME", "test")
             .env("GIT_AUTHOR_EMAIL", "test@example.com")
             .env("GIT_COMMITTER_NAME", "test")

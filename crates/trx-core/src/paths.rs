@@ -46,6 +46,11 @@ pub fn data_base() -> crate::Result<PathBuf> {
     base_dir("XDG_DATA_HOME", ".local/share")
 }
 
+/// Base state directory (`~/.local/state` on unix).
+pub fn state_base() -> crate::Result<PathBuf> {
+    base_dir("XDG_STATE_HOME", ".local/state")
+}
+
 /// Expand a leading `~/` to the home directory.
 pub fn expand_tilde(path: &str) -> crate::Result<PathBuf> {
     if let Some(rest) = path.strip_prefix("~/") {

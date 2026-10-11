@@ -211,9 +211,48 @@ fn binding_path(root: &Path) -> Result<PathBuf> {
         ),
         ..checkout
     };
-    Ok(crate::paths::config_base()?
-        .join("trx/bindings")
-        .join(format!("{}.json", short_id(&checkout.identity))))
+    let name = format!("{}.json", short_id(&checkout.identity));
+    let destination = crate::paths::state_base()?.join("trx/bindings").join(&name);
+    let legacy = crate::paths::config_base()?.join("trx/bindings").join(name);
+    migrate_binding(&legacy, &destination)?;
+    Ok(destination)
+}
+
+/// Move generated routing state out of user configuration. Never overwrite
+/// a different destination binding or remove an unvalidated source.
+fn migrate_binding(legacy: &Path, destination: &Path) -> Result<()> {
+    if legacy == destination || !legacy.is_file() {
+        return Ok(());
+    }
+    let content = fs::read_to_string(legacy)?;
+    let binding: CentralMarker = serde_json::from_str(&content)?;
+    if destination.is_file() {
+        let existing: CentralMarker = serde_json::from_str(&fs::read_to_string(destination)?)?;
+        if existing != binding {
+            return Err(Error::Other(format!(
+                "conflicting trx bindings: {} and {} (both preserved)",
+                legacy.display(),
+                destination.display()
+            )));
+        }
+    } else {
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        // create_new prevents concurrent migration from overwriting a binding.
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(destination)?;
+        file.write_all(content.as_bytes())?;
+        file.sync_all()?;
+    }
+    fs::remove_file(legacy)?;
+    if let Some(parent) = legacy.parent() {
+        let _ = fs::remove_dir(parent); // only removes an empty legacy directory
+    }
+    Ok(())
 }
 
 /// Handle for one central store root.
@@ -701,6 +740,33 @@ mod tests {
         assert_ne!(a.record.identity, b.record.identity);
         assert_ne!(a.dir, b.dir);
         assert_eq!(store.repos().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_binding_migration_preserves_routing_and_removes_legacy() {
+        let temp = tempfile::tempdir().unwrap();
+        let old = temp.path().join("config/bindings/repo.json");
+        let new = temp.path().join("state/bindings/repo.json");
+        fs::create_dir_all(old.parent().unwrap()).unwrap();
+        let content = r#"{"store":"team","store_root":null}"#;
+        fs::write(&old, content).unwrap();
+        migrate_binding(&old, &new).unwrap();
+        assert_eq!(fs::read_to_string(&new).unwrap(), content);
+        assert!(!old.exists());
+        assert!(!old.parent().unwrap().exists());
+        migrate_binding(&old, &new).unwrap();
+    }
+
+    #[test]
+    fn test_binding_migration_preserves_conflicting_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let old = temp.path().join("old.json");
+        let new = temp.path().join("new.json");
+        fs::write(&old, r#"{"store":"a","store_root":null}"#).unwrap();
+        fs::write(&new, r#"{"store":"b","store_root":null}"#).unwrap();
+        assert!(migrate_binding(&old, &new).is_err());
+        assert!(old.exists());
+        assert!(new.exists());
     }
 
     #[test]
