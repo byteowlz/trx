@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Fixed
+
+- Installer supports nested release `bin/` directories and legacy flat archives, and selects the published Linux GNU target rather than nonexistent musl assets.
+- Fresh central-store sync initialization adopts the remote default branch (or `main` for empty remotes) and aborts failed initial merges without pushing.
+- Central-mode `doctor` checks and repairs central-store merge attributes instead of requiring or modifying checkout `.gitattributes`.
+
 ## [0.9.0] - 2026-10-12
 
 ### Removed

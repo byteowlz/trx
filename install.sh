@@ -165,8 +165,8 @@ detect_platform() {
     
     # Construct target triple
     if [[ "$os" == "linux" ]]; then
-        # Prefer musl for better compatibility
-        TARGET="${arch}-unknown-linux-musl"
+        # Current byt releases publish glibc-compatible Linux binaries.
+        TARGET="${arch}-unknown-linux-gnu"
     else
         TARGET="${arch}-apple-darwin"
     fi
@@ -238,8 +238,12 @@ install() {
     
     for component in "${COMPONENTS[@]}"; do
         local bin_path="$tmpdir/$component"
+        # byt releases use <archive-name>/bin; older releases were flat.
+        if [[ ! -f "$bin_path" ]]; then
+            bin_path="$tmpdir/${archive_name%.tar.gz}/bin/$component"
+        fi
         
-        if [[ -f "$bin_path" ]]; then
+        if [[ -f "$bin_path" && ! -L "$bin_path" ]]; then
             # Check if component already exists
             if [[ -f "$INSTALL_PREFIX/$component" ]]; then
                 warning "$component already exists, overwriting..."

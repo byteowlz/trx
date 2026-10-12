@@ -478,8 +478,13 @@ pub fn full_sync(store_root: &Path, cfg: &SyncConfig) -> Result<SyncOutcome> {
 pub fn init_remote(store_root: &Path, remote: &str, cfg: &SyncConfig) -> Result<SyncOutcome> {
     std::fs::create_dir_all(store_root)?;
     let timeout = Duration::from_secs(cfg.timeout_secs);
-    if !is_git_repo(store_root) {
-        let out = run_git(store_root, &["init", "-q"], timeout)?;
+    let fresh = !is_git_repo(store_root);
+    if fresh {
+        let out = run_git(
+            store_root,
+            &["init", "-q", "--initial-branch=main"],
+            timeout,
+        )?;
         if !out.success {
             return Err(Error::Other(format!(
                 "git init failed: {}",
@@ -514,6 +519,35 @@ pub fn init_remote(store_root: &Path, remote: &str, cfg: &SyncConfig) -> Result<
             }
         }
     }
+    if fresh {
+        let head = run_git(
+            store_root,
+            &["ls-remote", "--symref", "origin", "HEAD"],
+            timeout,
+        )?;
+        if !head.success {
+            return Err(Error::Other(format!(
+                "cannot discover remote default branch: {}",
+                head.combined().trim()
+            )));
+        }
+        if let Some(branch) = head.stdout.lines().find_map(|line| {
+            line.strip_prefix("ref: refs/heads/")
+                .and_then(|rest| rest.strip_suffix("\tHEAD"))
+        }) {
+            let selected = run_git(
+                store_root,
+                &["symbolic-ref", "HEAD", &format!("refs/heads/{branch}")],
+                timeout,
+            )?;
+            if !selected.success {
+                return Err(Error::Other(format!(
+                    "cannot select remote branch: {}",
+                    selected.combined().trim()
+                )));
+            }
+        }
+    }
     ensure_store_git_files(store_root)?;
     commit_all(store_root, cfg, "install sync rules")?;
     // Connect: fetch existing remote history and merge it (union rules make
@@ -535,7 +569,7 @@ pub fn init_remote(store_root: &Path, remote: &str, cfg: &SyncConfig) -> Result<
         .map(|out| out.success)
         .unwrap_or(false)
     {
-        let _ = run_git(
+        let merged = run_git(
             store_root,
             &[
                 "merge",
@@ -545,6 +579,13 @@ pub fn init_remote(store_root: &Path, remote: &str, cfg: &SyncConfig) -> Result<
             ],
             timeout,
         )?;
+        if !merged.success {
+            let _ = run_git(store_root, &["merge", "--abort"], timeout);
+            return Err(Error::Other(format!(
+                "initial store merge failed; nothing pushed: {}",
+                merged.combined().trim()
+            )));
+        }
     }
     let mut outcome = push_only(store_root, cfg)?;
     outcome.pulled |= fetch_ok;
@@ -725,6 +766,81 @@ mod tests {
         }
         let ignore = fs::read_to_string(temp.path().join(GITIGNORE)).unwrap();
         assert!(ignore.contains("local/"));
+    }
+
+    #[test]
+    fn test_init_adopts_remote_head_and_never_pushes_master() {
+        let remote = tempfile::tempdir().unwrap();
+        git(remote.path(), &["init", "-q", "--bare", "-b", "team"]);
+        let seed = tempfile::tempdir().unwrap();
+        git(seed.path(), &["init", "-q", "-b", "team"]);
+        ensure_store_git_files(seed.path()).unwrap();
+        fs::create_dir_all(seed.path().join("repos/app")).unwrap();
+        fs::write(seed.path().join("repos/app/issues.jsonl"), "seeded issue\n").unwrap();
+        git(seed.path(), &["add", "."]);
+        git(seed.path(), &["commit", "-qm", "seed"]);
+        git(
+            seed.path(),
+            &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        );
+        git(seed.path(), &["push", "-q", "origin", "team"]);
+        let local = tempfile::tempdir().unwrap();
+        init_remote(local.path(), remote.path().to_str().unwrap(), &cfg()).unwrap();
+        assert_eq!(
+            current_branch(local.path(), &cfg()).as_deref(),
+            Some("team")
+        );
+        assert_eq!(
+            fs::read_to_string(local.path().join("repos/app/issues.jsonl")).unwrap(),
+            "seeded issue\n"
+        );
+        assert!(
+            !run_git(
+                remote.path(),
+                &["show-ref", "--verify", "refs/heads/master"],
+                Duration::from_secs(10)
+            )
+            .unwrap()
+            .success
+        );
+    }
+
+    #[test]
+    fn test_init_merge_conflict_does_not_push() {
+        let remote = tempfile::tempdir().unwrap();
+        git(remote.path(), &["init", "-q", "--bare", "-b", "main"]);
+        let seed = tempfile::tempdir().unwrap();
+        init_remote(seed.path(), remote.path().to_str().unwrap(), &cfg()).unwrap();
+        fs::create_dir_all(seed.path().join("repos/app")).unwrap();
+        fs::write(seed.path().join("repos/app/repo.json"), "remote\n").unwrap();
+        full_sync(seed.path(), &cfg()).unwrap();
+        let before = run_git(
+            remote.path(),
+            &["rev-parse", "main"],
+            Duration::from_secs(10),
+        )
+        .unwrap()
+        .stdout;
+        let local = tempfile::tempdir().unwrap();
+        git(local.path(), &["init", "-q", "-b", "main"]);
+        fs::create_dir_all(local.path().join("repos/app")).unwrap();
+        fs::write(local.path().join("repos/app/repo.json"), "local\n").unwrap();
+        let error = init_remote(local.path(), remote.path().to_str().unwrap(), &cfg()).unwrap_err();
+        assert!(error.to_string().contains("nothing pushed"));
+        assert_eq!(
+            run_git(
+                remote.path(),
+                &["rev-parse", "main"],
+                Duration::from_secs(10)
+            )
+            .unwrap()
+            .stdout,
+            before
+        );
+        assert_eq!(
+            fs::read_to_string(local.path().join("repos/app/repo.json")).unwrap(),
+            "local\n"
+        );
     }
 
     #[test]

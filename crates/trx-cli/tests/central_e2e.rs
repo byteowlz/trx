@@ -584,6 +584,36 @@ fn onboard_bootstraps_store_policy_and_bulk_migrates_in_one_command() {
 }
 
 #[test]
+fn central_doctor_repairs_only_store_attributes() {
+    let env = Env::new();
+    let base = tempfile::tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let store = base.path().join("store");
+    init_git_repo(&repo);
+    std::fs::write(repo.join(".gitattributes"), "*.txt text\n").unwrap();
+    repo_cmd(&env, &repo)
+        .args(["central", "init", "--store-root"])
+        .arg(&store)
+        .assert()
+        .success();
+    repo_cmd(&env, &repo)
+        .args(["doctor", "--fix"])
+        .assert()
+        .success();
+    assert_eq!(
+        std::fs::read_to_string(repo.join(".gitattributes")).unwrap(),
+        "*.txt text\n"
+    );
+    assert!(!repo.join(".trx").exists());
+    let rules = std::fs::read_to_string(store.join(".gitattributes")).unwrap();
+    assert!(rules.contains("repos/**/issues.jsonl"));
+    repo_cmd(&env, &repo).args(["doctor"]).assert().success();
+    std::fs::remove_file(repo.join(".gitattributes")).unwrap();
+    repo_cmd(&env, &repo).args(["doctor"]).assert().success();
+    assert!(!repo.join(".gitattributes").exists());
+}
+
+#[test]
 fn init_with_store_opts_into_central_mode_and_misplaced_keys_are_rejected() {
     let env = Env::new();
     let base = tempfile::tempdir().unwrap();

@@ -98,7 +98,14 @@ pub fn doctor(fix: bool, json: bool) -> Result<()> {
     let root = trx_dir
         .parent()
         .ok_or_else(|| anyhow::anyhow!("invalid trx directory: {}", trx_dir.display()))?;
-    let attrs_path = root.join(".gitattributes");
+    let central_root = store.central_repo().and_then(|repo| repo.store_root());
+    let attributes_root = central_root.as_deref().unwrap_or(root);
+    let attrs_path = attributes_root.join(".gitattributes");
+    let required_rules = if store.is_central() {
+        &trx_core::sync::STORE_GITATTRIBUTES_LINES
+    } else {
+        &TRX_GITATTRIBUTES_LINES
+    };
 
     if store.is_central() {
         let message = store.central_repo().map_or_else(
@@ -150,7 +157,7 @@ pub fn doctor(fix: bool, json: bool) -> Result<()> {
     } else {
         String::new()
     };
-    let missing: Vec<&str> = TRX_GITATTRIBUTES_LINES
+    let missing: Vec<&str> = required_rules
         .iter()
         .copied()
         .filter(|line| {
@@ -168,7 +175,11 @@ pub fn doctor(fix: bool, json: bool) -> Result<()> {
             fixed: false,
         });
     } else if fix {
-        Store::ensure_merge_attributes(root)?;
+        if store.is_central() {
+            trx_core::sync::ensure_store_git_files(attributes_root)?;
+        } else {
+            Store::ensure_merge_attributes(root)?;
+        }
         checks.push(DoctorCheck {
             name: "merge_attributes",
             status: "fixed",
