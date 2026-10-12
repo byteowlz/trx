@@ -9,8 +9,8 @@
 //! marker written — restoring the backups restores the pre-migration state.
 
 use crate::central::{self, CentralStore, Checkout};
-use crate::store::{LEGACY_CRDT_DIR, LOCK_FILE, StoreLock};
-use crate::{Error, Issue, Result, legacy_crdt};
+use crate::store::{LOCK_FILE, StoreLock};
+use crate::{Error, Issue, Result};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -210,22 +210,8 @@ pub fn migrate_repo(
     if !trx_dir.is_dir() {
         return Err(Error::NotInitialized);
     }
-    // Legacy v2 automerge layout: convert to JSONL exactly like Store's own
-    // transparent migration (load crdt → append snapshots → drop crdt dir),
-    // then migrate normally. Dry runs only count, never write.
-    let crdt_dir = trx_dir.join(LEGACY_CRDT_DIR);
-    let mut crdt_issue_count = 0usize;
-    if crdt_dir.exists() {
-        let issues = legacy_crdt::load_issues(&crdt_dir)?;
-        crdt_issue_count = issues.len();
-        if !opts.dry_run {
-            let lines: Vec<String> = issues
-                .iter()
-                .map(|issue| serde_json::to_string(issue).map_err(Error::Json))
-                .collect::<Result<Vec<_>>>()?;
-            append_lines(&trx_dir.join(ISSUES_FILE), &lines)?;
-            fs::remove_dir_all(&crdt_dir)?;
-        }
+    if trx_dir.join("crdt").exists() {
+        return Err(Error::Other("Legacy Automerge stores are unsupported since trx 0.9.0; convert with trx 0.8.3 before upgrading. Nothing modified.".into()));
     }
 
     let marker = central::read_marker(repo_root)?;
@@ -314,7 +300,7 @@ pub fn migrate_repo(
         identity: checkout.identity.clone(),
         ledger: central_repo.dir.display().to_string(),
         dry_run: opts.dry_run,
-        issue_snapshots: ledger.issue_lines.len() + crdt_issue_count,
+        issue_snapshots: ledger.issue_lines.len(),
         issues: local_issues.len(),
         dependencies,
         events: local_events.len(),
@@ -868,34 +854,37 @@ mod tests {
     }
 
     #[test]
-    fn test_legacy_crdt_layout_is_converted_then_migrated() {
-        use automerge::AutoCommit;
-        use automerge::transaction::Transactable;
+    fn test_legacy_crdt_layout_is_rejected_without_modification() {
         let base = tempfile::tempdir().unwrap();
         let repo = base.path().join("repo");
         let store_root = base.path().join("store");
         init_git_repo(&repo);
 
-        // A real automerge doc in the legacy layout (only id/title required).
-        let mut doc = AutoCommit::new();
-        doc.put(automerge::ROOT, "id", "app-crdt").unwrap();
-        doc.put(automerge::ROOT, "title", "from automerge era")
-            .unwrap();
         let crdt_dir = repo.join(".trx/crdt");
         fs::create_dir_all(&crdt_dir).unwrap();
-        fs::write(crdt_dir.join("app-crdt.automerge"), doc.save()).unwrap();
-
-        let report = migrate_repo(&repo, &store_root, None, MigrateOptions::default()).unwrap();
-        assert_eq!(report.issues, 1, "crdt issue migrated");
+        let source = crdt_dir.join("old.automerge");
+        fs::write(&source, b"legacy data").unwrap();
+        for dry_run in [false, true] {
+            let error = migrate_repo(
+                &repo,
+                &store_root,
+                None,
+                MigrateOptions {
+                    dry_run,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("unsupported"));
+            assert_eq!(fs::read(&source).unwrap(), b"legacy data");
+            assert!(!store_root.exists());
+        }
         assert!(
-            !repo.join(".trx/crdt").exists(),
-            "legacy layout removed after conversion"
+            crate::Store::open_at(repo)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("unsupported")
         );
-        assert!(central::read_marker(&repo).unwrap().is_some());
-
-        let cs = CentralStore::open_at(store_root);
-        let central_repo = cs.find(&Checkout::at(&repo).unwrap()).unwrap().unwrap();
-        let issues = resolve_issues(&read_lines(&central_repo.issues_path()).unwrap()).unwrap();
-        assert_eq!(issues["app-crdt"].title, "from automerge era");
     }
 }

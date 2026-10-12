@@ -62,7 +62,7 @@ trx uses a single canonical JSONL store:
 - Git tracks normal text diffs/merges
 - No active CRDT write path
 
-Legacy note: if an old `.trx/crdt/*.automerge` layout is detected, trx loads it for compatibility and transparently materializes JSONL on the next mutation.
+Breaking change in 0.9.0: Automerge/CRDT stores are no longer supported. Convert old `.trx/crdt/*.automerge` trackers with trx 0.8.3 before upgrading. Version 0.9.0 rejects those stores without modifying them; current storage is JSONL only.
 
 ## Data Model
 

@@ -13,19 +13,13 @@ uuid.workspace = true
 base32.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-anyhow.workspace = true
 petgraph.workspace = true
-
-# CRDT storage
-automerge = "0.5"
 
 # Process management
 sysinfo = "0.32"
 
 [dev-dependencies]
 tempfile = "3"
-assert_cmd = "2"
-predicates = "3"
 
 [lints]
 workspace = true

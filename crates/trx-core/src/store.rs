@@ -1,14 +1,11 @@
 //! JSONL store for trx issues.
 //!
-//! No daemon, no SQLite — issues live in `.trx/issues.jsonl`. The store
-//! transparently migrates legacy v2 (Automerge) layouts on open: when a
-//! `.trx/crdt/` directory is detected, its `.automerge` files are read into
-//! memory and the next mutation flushes JSONL and removes the legacy
-//! directory. Reads never mutate disk.
+//! No daemon, no SQLite — issues live in JSONL. Automerge layouts are
+//! rejected without modification; convert them with trx 0.8.3 first.
 
 use crate::central::{self, CentralRepo};
 use crate::global_config::DefaultMode;
-use crate::{Error, Issue, Result, legacy_crdt};
+use crate::{Error, Issue, Result};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -29,16 +26,11 @@ pub const TRX_GITATTRIBUTES_LINES: [&str; 3] = [
 ];
 const LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(25);
-pub(crate) const LEGACY_CRDT_DIR: &str = "crdt";
-const LEGACY_ISSUES_MD: &str = "ISSUES.md";
 
 /// JSONL-based issue store.
 pub struct Store {
     root: PathBuf,
     issues: HashMap<String, Issue>,
-    /// True when issues were loaded from legacy CRDT files; the next save will
-    /// write canonical JSONL and remove the legacy `crdt/` directory.
-    migrate_pending: bool,
     /// Set when the checkout selected central mode via `.trx/central`: the
     /// authoritative ledger lives in the per-user central store.
     central: Option<CentralRepo>,
@@ -91,7 +83,6 @@ impl Store {
         let mut store = Self {
             root,
             issues: HashMap::new(),
-            migrate_pending: false,
             central: None,
         };
         if let Some(marker) = central::read_marker(&store.root)? {
@@ -119,7 +110,6 @@ impl Store {
         let mut store = Self {
             root,
             issues: HashMap::new(),
-            migrate_pending: false,
             central: None,
         };
         store.open_central(store_root)?;
@@ -138,7 +128,6 @@ impl Store {
         let mut store = Self {
             root,
             issues: HashMap::new(),
-            migrate_pending: false,
             central: None,
         };
         store.open_central(store_root)?;
@@ -238,7 +227,6 @@ prefix = "{}"
         Ok(Self {
             root,
             issues: HashMap::new(),
-            migrate_pending: false,
             central: None,
         })
     }
@@ -339,27 +327,10 @@ prefix = "{}"
         self.ledger_dir().join(ISSUES_FILE)
     }
 
-    /// True if the store was loaded from a legacy CRDT layout and the next
-    /// save will materialize JSONL + clean up `crdt/`.
-    pub fn migrate_pending(&self) -> bool {
-        self.migrate_pending
-    }
-
     fn load(&mut self) -> Result<()> {
         self.issues.clear();
-        self.migrate_pending = false;
-        let trx_dir = self.trx_dir();
-        let crdt_dir = trx_dir.join(LEGACY_CRDT_DIR);
-
-        // Legacy v2 layout: `.trx/crdt/*.automerge`. Load issues into memory
-        // and flag the migration; we do not touch disk on read.
-        if crdt_dir.exists() {
-            let issues = legacy_crdt::load_issues(&crdt_dir)?;
-            for issue in issues {
-                self.issues.insert(issue.id.clone(), issue);
-            }
-            self.migrate_pending = true;
-            return Ok(());
+        if self.ledger_dir().join("crdt").exists() {
+            return Err(Error::Other("Legacy Automerge stores are unsupported since trx 0.9.0; convert with trx 0.8.3 before upgrading. Nothing modified.".into()));
         }
 
         // Canonical JSONL layout.
@@ -389,9 +360,7 @@ prefix = "{}"
 
     /// Append current issue snapshots to JSONL. This preserves the append-only
     /// log shape; callers that mutate several issues in-memory still persist a
-    /// latest snapshot for each issue instead of rewriting existing lines. On
-    /// the first save after a legacy migration, also removes the `crdt/`
-    /// directory and the derived `ISSUES.md` artifact.
+    /// latest snapshot for each issue instead of rewriting existing lines.
     pub fn save(&mut self) -> Result<()> {
         let _lock = self.acquire_lock()?;
         self.save_locked()
@@ -401,22 +370,15 @@ prefix = "{}"
         let mut sorted: Vec<Issue> = self.issues.values().cloned().collect();
         sorted.sort_by(|a, b| a.id.cmp(&b.id));
         self.append_issues_locked(&sorted)?;
-        self.finish_legacy_migration_if_needed();
         Ok(())
     }
 
     fn persist_changed_issue_locked(&mut self, issue: &Issue) -> Result<()> {
-        if self.migrate_pending {
-            self.save_locked()
-        } else {
-            self.append_issue_locked(issue)
-        }
+        self.append_issue_locked(issue)
     }
 
     fn append_issue_locked(&mut self, issue: &Issue) -> Result<()> {
-        self.append_issues_locked(std::slice::from_ref(issue))?;
-        self.finish_legacy_migration_if_needed();
-        Ok(())
+        self.append_issues_locked(std::slice::from_ref(issue))
     }
 
     fn append_issues_locked(&self, issues: &[Issue]) -> Result<()> {
@@ -454,20 +416,6 @@ prefix = "{}"
         }
         fs::rename(&tmp, &path)?;
         Ok(())
-    }
-
-    fn finish_legacy_migration_if_needed(&mut self) {
-        if self.migrate_pending {
-            let crdt_dir = self.trx_dir().join(LEGACY_CRDT_DIR);
-            if crdt_dir.exists() {
-                let _ = fs::remove_dir_all(&crdt_dir);
-            }
-            let issues_md = self.trx_dir().join(LEGACY_ISSUES_MD);
-            if issues_md.exists() {
-                let _ = fs::remove_file(&issues_md);
-            }
-            self.migrate_pending = false;
-        }
     }
 
     fn acquire_lock(&self) -> Result<StoreLock> {

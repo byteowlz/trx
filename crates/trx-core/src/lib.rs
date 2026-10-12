@@ -13,7 +13,6 @@ pub mod global_config;
 pub mod graph;
 pub mod id;
 pub mod issue;
-pub(crate) mod legacy_crdt;
 pub mod migrate;
 pub mod paths;
 pub mod service;

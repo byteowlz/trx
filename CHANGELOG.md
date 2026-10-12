@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## [0.9.0] - 2026-10-12
+
+### Removed
+
+- **Breaking:** Removed Automerge and support for legacy `.trx/crdt/*.automerge` stores. Convert those trackers with trx 0.8.3 before upgrading; 0.9.0 rejects legacy CRDT layouts without modifying their files.
+- **Breaking:** Removed the public `Store::migrate_pending()` method and the `migrate_pending` field from CLI environment-report JSON; transparent CRDT conversion and cleanup no longer exist.
+- Removed unused direct dependencies: core `anyhow` and dev dependencies `assert_cmd`/`predicates`, API `tower`/`thiserror`, and TUI `serde`.
+
 ## [0.8.3] - 2026-10-11
 
 ### Fixed

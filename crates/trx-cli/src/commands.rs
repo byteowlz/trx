@@ -3266,7 +3266,6 @@ pub fn info(json: bool) -> Result<()> {
                 "ledger_path": ledger_dir.display().to_string(),
                 "central": store.is_central(),
                 "format": "jsonl",
-                "migrate_pending": store.migrate_pending(),
                 "issues": issue_count,
                 "open": open_count,
                 "closed": closed_count,
@@ -3294,12 +3293,6 @@ pub fn info(json: bool) -> Result<()> {
         Some(s) => {
             println!("  path     {}", s["path"].as_str().unwrap_or("?"));
             println!("  format   {}", s["format"].as_str().unwrap_or("?"));
-            if s["migrate_pending"].as_bool() == Some(true) {
-                println!(
-                    "  {} legacy CRDT layout detected — will migrate on next mutation",
-                    "!".yellow()
-                );
-            }
             println!(
                 "  issues   {} ({} open, {} closed)",
                 s["issues"], s["open"], s["closed"]
