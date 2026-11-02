@@ -338,6 +338,12 @@ pub fn migrate_repo(
     append_lines(&central_repo.events_path(), &new_event_lines)?;
     append_lines(&central_repo.verifications_path(), &new_verification_lines)?;
 
+    let local_config = trx_dir.join("config.toml");
+    let central_config = central_repo.config_path();
+    if !central_config.is_file() && local_config.is_file() {
+        fs::copy(&local_config, &central_config)?;
+    }
+
     // Verify the central ledger now contains everything local had.
     let merged_issues = resolve_issues(&read_lines(&central_repo.issues_path())?)?;
     for (id, local_final) in &local_issues {
@@ -886,5 +892,23 @@ mod tests {
                 .to_string()
                 .contains("unsupported")
         );
+    }
+
+    #[test]
+    fn test_migrate_copies_local_config_into_central_ledger() {
+        let base = tempfile::tempdir().unwrap();
+        let repo = base.path().join("repo");
+        let store_root = base.path().join("store");
+        init_git_repo(&repo);
+        seed_local(&repo, &[issue_snapshot("pnp-1", "x", 0)], &[], &[]);
+        fs::write(repo.join(".trx/config.toml"), "prefix = \"pnp\"\n").unwrap();
+
+        migrate_repo(&repo, &store_root, None, MigrateOptions::default()).unwrap();
+
+        // Remove .trx/ completely and verify prefix still resolves to "pnp".
+        fs::remove_dir_all(repo.join(".trx")).unwrap();
+        let store = crate::Store::open_central_auto(repo, store_root).unwrap();
+        assert_eq!(store.prefix().unwrap(), "pnp");
+        assert!(store.config_path().is_file());
     }
 }

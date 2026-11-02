@@ -55,8 +55,9 @@ pub fn central_init(
     store: Option<&str>,
     store_root: Option<&str>,
     json: bool,
+    prefix: Option<&str>,
 ) -> Result<()> {
-    central_init_impl(dry_run, store, store_root, json, None)
+    central_init_impl(dry_run, store, store_root, json, prefix)
 }
 
 pub(crate) fn central_init_impl(
@@ -127,6 +128,12 @@ pub(crate) fn central_init_impl(
         if same_store && same_root {
             // Re-running init repairs legacy markers containing resolved paths.
             central::write_marker(&repo_root, store, store_root.map(std::path::Path::new))?;
+            if let Some(prefix) = prefix {
+                let repo = cs.register(&checkout)?;
+                let mut settings = trx_core::Config::load(&repo.config_path())?;
+                settings.prefix = prefix.to_owned();
+                settings.save(&repo.config_path())?;
+            }
             if json {
                 println!(
                     "{}",
@@ -135,6 +142,8 @@ pub(crate) fn central_init_impl(
                         "identity": Checkout::at(&repo_root)?.identity,
                     })
                 );
+            } else if let Some(prefix) = prefix {
+                println!("Already in central mode — updated prefix to {prefix}.");
             } else {
                 println!("Already in central mode — nothing to do.");
             }

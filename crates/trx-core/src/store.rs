@@ -138,7 +138,13 @@ impl Store {
     fn open_central(&mut self, store_root: PathBuf) -> Result<()> {
         let cs = central::CentralStore::open_at(store_root.clone());
         let checkout = central::Checkout::at(&self.root)?;
-        self.central = Some(cs.register(&checkout)?);
+        let repo = cs.register(&checkout)?;
+        let central_cfg = repo.config_path();
+        let local_cfg = self.trx_dir().join(CONFIG_FILE);
+        if !central_cfg.is_file() && local_cfg.is_file() {
+            let _ = fs::copy(&local_cfg, &central_cfg);
+        }
+        self.central = Some(repo);
         // Automatic sync (opt-in per store): pull at first access, remember
         // the store for the end-of-process final sync. Best-effort — never
         // fail the command because a git operation failed.
@@ -249,16 +255,13 @@ prefix = "{}"
             }
         }
 
-        // Outside a git repo, keep legacy behavior and search to filesystem root.
-        let mut current = start;
-        loop {
-            if current.join(TRX_DIR).exists() {
-                return Ok(current);
-            }
-            if !current.pop() {
-                return Err(Error::NotInitialized);
-            }
+        // Outside a git repo, only match `.trx/` in the current directory so a
+        // workspace parent `.trx/` folder never hijacks child
+        // project directories created underneath it.
+        if start.join(TRX_DIR).exists() {
+            return Ok(start);
         }
+        Err(Error::NotInitialized)
     }
 
     fn find_git_root_from(start: &Path) -> Option<PathBuf> {
@@ -320,6 +323,12 @@ prefix = "{}"
     /// Details of the central repo backing this store, if in central mode.
     pub fn central_repo(&self) -> Option<&CentralRepo> {
         self.central.as_ref()
+    }
+
+    /// Path to the authoritative `config.toml`: inside the central repo
+    /// directory in central mode, or `.trx/config.toml` in repo-local mode.
+    pub fn config_path(&self) -> PathBuf {
+        self.ledger_dir().join(CONFIG_FILE)
     }
 
     /// Path to issues.jsonl (in the authoritative ledger directory).
@@ -814,6 +823,24 @@ mod tests {
         fs::create_dir_all(&nested).unwrap();
 
         std::env::set_current_dir(&nested).unwrap();
+        let root = Store::find_root();
+        std::env::set_current_dir(old_cwd).unwrap();
+
+        assert!(matches!(root, Err(Error::NotInitialized)));
+    }
+
+    #[test]
+    fn test_find_root_outside_git_does_not_leak_from_parent_workspace_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let old_cwd = std::env::current_dir().unwrap();
+
+        // A workspace container has a stale .trx/, and a new
+        // project subdir has neither .git nor .trx/ yet.
+        fs::create_dir_all(temp.path().join(TRX_DIR)).unwrap();
+        let child = temp.path().join("penandpaper");
+        fs::create_dir_all(&child).unwrap();
+
+        std::env::set_current_dir(&child).unwrap();
         let root = Store::find_root();
         std::env::set_current_dir(old_cwd).unwrap();
 

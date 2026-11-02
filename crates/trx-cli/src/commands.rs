@@ -1036,7 +1036,7 @@ fn check_verification_gate(store: &Store, issue_id: &str) -> std::result::Result
         .get(issue_id)
         .ok_or_else(|| vec![format!("Issue not found: {}", issue_id)])?;
 
-    let config_path = store.trx_dir().join("config.toml");
+    let config_path = store.config_path();
     let config = Config::load(&config_path).unwrap_or_default();
     let vconfig: &VerificationConfig = &config.verification;
     if vconfig.is_inactive() {
@@ -2851,7 +2851,7 @@ pub fn schema() -> Result<()> {
 /// Show current configuration
 pub fn config_show(json: bool) -> Result<()> {
     let store = Store::open()?;
-    let config_path = store.trx_dir().join("config.toml");
+    let config_path = store.config_path();
     let config = trx_core::Config::load(&config_path)?;
 
     if json {
@@ -2912,7 +2912,14 @@ pub fn config_show(json: bool) -> Result<()> {
 /// Edit configuration file
 pub fn config_edit() -> Result<()> {
     let store = Store::open()?;
-    let config_path = store.trx_dir().join("config.toml");
+    let config_path = store.config_path();
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if !config_path.exists() {
+        let default_config = trx_core::Config::default_with_comments();
+        std::fs::write(&config_path, default_config)?;
+    }
 
     // Get editor from environment
     let editor = std::env::var("EDITOR")
@@ -2945,7 +2952,10 @@ pub fn config_edit() -> Result<()> {
 /// Reset configuration to defaults
 pub fn config_reset() -> Result<()> {
     let store = Store::open()?;
-    let config_path = store.trx_dir().join("config.toml");
+    let config_path = store.config_path();
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
 
     let default_config = trx_core::Config::default_with_comments();
     std::fs::write(&config_path, default_config)?;
@@ -2957,7 +2967,7 @@ pub fn config_reset() -> Result<()> {
 /// Get a specific config value
 pub fn config_get(key: &str, json: bool) -> Result<()> {
     let store = Store::open()?;
-    let config_path = store.trx_dir().join("config.toml");
+    let config_path = store.config_path();
     let config = trx_core::Config::load(&config_path)?;
 
     // Convert config to JSON for key lookup
@@ -2991,7 +3001,10 @@ pub fn config_get(key: &str, json: bool) -> Result<()> {
 /// Set a config value
 pub fn config_set(key: &str, value: &str) -> Result<()> {
     let store = Store::open()?;
-    let config_path = store.trx_dir().join("config.toml");
+    let config_path = store.config_path();
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let mut config = trx_core::Config::load(&config_path)?;
 
     // Handle top-level and nested keys

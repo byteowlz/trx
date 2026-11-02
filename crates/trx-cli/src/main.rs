@@ -568,6 +568,9 @@ enum CentralCommands {
         /// Show what would happen without writing anything
         #[arg(long)]
         dry_run: bool,
+        /// Issue ID prefix (e.g. `pnp` generates `pnp-xxxx`)
+        #[arg(long)]
+        prefix: Option<String>,
     },
     /// Show mode, identity, ledger location and sync summary
     Status,
@@ -958,11 +961,12 @@ fn run(cli: Cli) -> Result<()> {
             no_commit,
         } => commands::sync(message, dry_run, no_commit),
         Commands::Central { command } => match command {
-            CentralCommands::Init { dry_run } => store_cmds::central_init(
+            CentralCommands::Init { dry_run, prefix } => store_cmds::central_init(
                 dry_run,
                 cli.store.as_deref(),
                 cli.store_root.as_deref(),
                 cli.json,
+                prefix.as_deref(),
             ),
             CentralCommands::Status => store_cmds::central_status(cli.json),
         },

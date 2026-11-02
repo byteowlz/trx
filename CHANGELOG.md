@@ -7,11 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Added
+
+- `trx central init --prefix <PREFIX>` sets the issue ID prefix in the central ledger config at initialization time (and updates it when re-run on an already-central checkout).
+
 ### Fixed
 
 - Installer supports nested release `bin/` directories and legacy flat archives, and selects the published Linux GNU target rather than nonexistent musl assets.
 - Fresh central-store sync initialization adopts the remote default branch (or `main` for empty remotes) and aborts failed initial merges without pushing.
 - Central-mode `doctor` checks and repairs central-store merge attributes instead of requiring or modifying checkout `.gitattributes`.
+- Checkouts without a git root commit now use a portable `name:<sanitized-name>` identity instead of a machine-local `path:<abs-path>` identity, and existing `path:` / `name:` central ledgers upgrade and merge automatically across machines and when the first commit is made (`trx-a1s8.10`).
+- Outside a git repository, store discovery no longer walks parent directories up to `/`, preventing a workspace container's `.trx` folder from hijacking child project directories.
+- `trx config` (`show`, `get`, `set`, `edit`, `reset`) and verification gates now read and write the authoritative central ledger `config.toml` in central mode, and `trx migrate` / central open adopt an existing `.trx/config.toml` (`trx-p60a`).
 
 ## [0.9.0] - 2026-10-12
 

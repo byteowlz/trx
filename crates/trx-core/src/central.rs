@@ -63,7 +63,7 @@ impl Checkout {
             .file_name()
             .map_or_else(|| "root".to_owned(), |n| n.to_string_lossy().into_owned());
         let identity = git_root_commit(&root).map_or_else(
-            || format!("path:{}", root.display()),
+            || format!("name:{}", sanitize(&name)),
             |sha| format!("git:{sha}"),
         );
         Ok(Self {
@@ -79,7 +79,7 @@ impl Checkout {
 /// Immutable once written so it never conflicts when the store is synced.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoRecord {
-    /// `git:<root-commit>` or `path:<canonical path>`.
+    /// `git:<root-commit>` or portable `name:<sanitized-name>` (legacy `path:<...>` is upgraded on registration).
     pub identity: String,
     /// Readable name (directory name of the first registered checkout).
     pub name: String,
@@ -309,12 +309,23 @@ impl CentralStore {
     }
 
     /// The central repo for `checkout`, if registered (the first directory
-    /// when several share its identity).
+    /// when several share its identity, or a legacy `path:` entry matching its
+    /// sanitized name).
     pub fn find(&self, checkout: &Checkout) -> Result<Option<CentralRepo>> {
-        Ok(self
-            .repos()?
-            .into_iter()
-            .find(|repo| repo.record.identity == checkout.identity))
+        let repos = self.repos()?;
+        if let Some(exact) = repos
+            .iter()
+            .find(|repo| repo.record.identity == checkout.identity)
+        {
+            return Ok(Some(exact.clone()));
+        }
+        // Legacy `path:<...>` directories registered before portable `name:`
+        // identities: match by sanitized checkout name so existing issues stay
+        // attached across machines and once a git commit lands.
+        let sanitized = sanitize(&checkout.name);
+        Ok(repos.into_iter().find(|repo| {
+            repo.record.identity.starts_with("path:") && sanitize(&repo.record.name) == sanitized
+        }))
     }
 
     /// Where `checkout` is (or would be) stored, without writing anything.
@@ -343,7 +354,10 @@ impl CentralStore {
     pub fn register(&self, checkout: &Checkout) -> Result<CentralRepo> {
         let mut repo = self.plan(checkout)?;
         let registry = repo.dir.join(REGISTRY_FILE);
-        if !registry.is_file() {
+        // Upgrade a legacy `path:` record (or a `name:` record that now has a
+        // git root commit) to the current portable identity in-place.
+        if !registry.is_file() || repo.record.identity != checkout.identity {
+            repo.record.identity = checkout.identity.clone();
             fs::create_dir_all(&repo.dir)?;
             write_atomic(&registry, &serde_json::to_string_pretty(&repo.record)?)?;
         }
@@ -355,15 +369,26 @@ impl CentralStore {
         Ok(repo)
     }
 
-    /// Merge other directories with `primary`'s identity into it, then remove
-    /// them. All trx files are append-only JSONL resolved by id on load, so
+    /// Merge other directories with `primary`'s identity (or legacy `path:`
+    /// directories with the same sanitized name) into it, then remove them.
+    /// All trx files are append-only JSONL resolved by id on load, so
     /// concatenation is a correct merge. A duplicate that is currently locked
     /// by another writer is left in place and merged on a later registration —
     /// never merged or deleted under an active writer.
     fn merge_duplicates(&self, primary: &CentralRepo) -> Result<Vec<PathBuf>> {
         let mut removed = Vec::new();
+        let primary_name = sanitize(&primary.record.name);
+        let name_identity = format!("name:{primary_name}");
         for other in self.repos()? {
-            if other.record.identity != primary.record.identity || other.dir == primary.dir {
+            if other.dir == primary.dir {
+                continue;
+            }
+            let same_identity = other.record.identity == primary.record.identity;
+            let legacy_same_name = (other.record.identity.starts_with("path:")
+                || (primary.record.identity.starts_with("git:")
+                    && other.record.identity == name_identity))
+                && sanitize(&other.record.name) == primary_name;
+            if !same_identity && !legacy_same_name {
                 continue;
             }
             let lock_path = other.dir.join(LOCK_FILE);
@@ -371,6 +396,9 @@ impl CentralStore {
                 continue;
             };
             merge_ledger_files(&other, primary)?;
+            if !primary.config_path().is_file() && other.config_path().is_file() {
+                let _ = fs::copy(other.config_path(), primary.config_path());
+            }
             fs::remove_dir_all(&other.dir)?;
             removed.push(other.dir);
         }
@@ -548,20 +576,60 @@ mod tests {
     }
 
     #[test]
-    fn test_identity_falls_back_to_path_without_git() {
+    fn test_identity_falls_back_to_portable_name_without_git() {
         let temp = tempfile::tempdir().unwrap();
-        fs::create_dir_all(temp.path()).unwrap();
-        let checkout = Checkout::at(temp.path()).unwrap();
-        assert!(checkout.identity.starts_with("path:"));
+        let a = temp.path().join("host-a/penandpaper");
+        let b = temp.path().join("host-b/penandpaper");
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+        let ca = Checkout::at(&a).unwrap();
+        let cb = Checkout::at(&b).unwrap();
+        assert_eq!(ca.identity, "name:penandpaper");
+        assert_eq!(ca.identity, cb.identity);
+        assert!(!ca.identity.contains('/'));
+        assert!(!ca.identity.contains('\\'));
     }
 
     #[test]
-    fn test_empty_git_repo_falls_back_to_path_identity() {
+    fn test_empty_git_repo_falls_back_to_portable_name_identity() {
         let temp = tempfile::tempdir().unwrap();
-        fs::create_dir_all(temp.path()).unwrap();
-        git(temp.path(), &["init", "-q"]);
-        let checkout = Checkout::at(temp.path()).unwrap();
-        assert!(checkout.identity.starts_with("path:"));
+        let dir = temp.path().join("penandpaper");
+        fs::create_dir_all(&dir).unwrap();
+        git(&dir, &["init", "-q"]);
+        let checkout = Checkout::at(&dir).unwrap();
+        assert_eq!(checkout.identity, "name:penandpaper");
+    }
+
+    #[test]
+    fn test_legacy_path_identity_upgrades_and_merges_across_machines() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = CentralStore::open_at(temp.path().join("store"));
+        // Simulate a synced repo.json created on macOS with a legacy path: identity.
+        let legacy_dir = store.root.join("repos").join("penandpaper--61ab374330dd");
+        fs::create_dir_all(&legacy_dir).unwrap();
+        fs::write(
+            legacy_dir.join(REGISTRY_FILE),
+            serde_json::to_string_pretty(&RepoRecord {
+                identity: "path:/Users/example/projects/penandpaper".into(),
+                name: "penandpaper".into(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(legacy_dir.join(ISSUES_FILE), "{\"id\":\"pnp-1\"}\n").unwrap();
+
+        // Registering the same project from a Linux path without git commits
+        // finds the existing ledger and upgrades its identity to `name:penandpaper`.
+        let linux_dir = temp.path().join("linux/penandpaper");
+        fs::create_dir_all(&linux_dir).unwrap();
+        let checkout = Checkout::at(&linux_dir).unwrap();
+        let repo = store.register(&checkout).unwrap();
+        assert_eq!(repo.dir, legacy_dir);
+        assert_eq!(repo.record.identity, "name:penandpaper");
+        let saved: RepoRecord =
+            serde_json::from_str(&fs::read_to_string(legacy_dir.join(REGISTRY_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(saved.identity, "name:penandpaper");
     }
 
     #[test]
